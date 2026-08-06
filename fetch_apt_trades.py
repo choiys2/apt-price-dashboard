@@ -469,7 +469,9 @@ def cmd_discover(args):
     """
     cfg = load_config(args.config)
     known = {code for code, _, _ in REGIONS}
-    bulk = {"timeout": cfg["bulk_timeout_sec"], "retries": cfg["bulk_retries"]}
+    # 막힌 러너에서는 코드마다 타임아웃을 꽉 채우므로 짧게 잡는다. 연결되는 러너는
+    # 0.4~1.0초에 응답하므로 5초면 충분하고, 141개 코드 스캔이 70분에서 12분이 된다.
+    bulk = {"timeout": args.timeout, "retries": 0}
     found, checked, failed = [], 0, 0
 
     for code in range(args.start, args.end + 1, args.step):
@@ -536,6 +538,7 @@ def main():
     p.add_argument("--end", type=int, required=True, help="끝 코드 (예: 28800)")
     p.add_argument("--step", type=int, default=5, help="증분 (기본 5)")
     p.add_argument("--ymd", default=month_range(4)[0], help="확인에 쓸 계약연월 YYYYMM")
+    p.add_argument("--timeout", type=int, default=5, help="코드당 타임아웃 초 (기본 5)")
     p.set_defaults(func=cmd_discover)
 
     p = sub.add_parser("fetch", help="범위 전체 수집")
