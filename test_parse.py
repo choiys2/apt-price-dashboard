@@ -11,6 +11,7 @@ import os
 import tempfile
 import unittest
 
+import fetch_apt_trades as fetch
 from fetch_apt_trades import ApiError, load_cache, normalize, parse_response, save_cache, month_range
 
 OK_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -169,6 +170,54 @@ class MonthRangeTest(unittest.TestCase):
         got = month_range(12)
         self.assertEqual(len(got), 12)
         self.assertEqual(got, sorted(got))
+
+
+class CircuitBreakerTest(unittest.TestCase):
+    """러너가 통째로 막혔을 때 남은 수천 건을 계속 시도하지 않고 멈추는지 고정한다."""
+
+    def setUp(self):
+        self.cfg = {"service_key": "x", "request_interval_sec": 0,
+                    "bulk_timeout_sec": 1, "bulk_retries": 0}
+        self.calls = 0
+
+    def _always_fail(self, cfg, code, ymd):
+        self.calls += 1
+        raise fetch.ApiError("timed out")
+
+    def test_aborts_after_consecutive_failures(self):
+        with tempfile.TemporaryDirectory() as d:
+            orig = fetch.fetch_month_raw
+            fetch.fetch_month_raw = self._always_fail
+            try:
+                out = fetch.collect(self.cfg, months=15, cache_dir=d, verbose=False,
+                                    max_consecutive_failures=5)
+            finally:
+                fetch.fetch_month_raw = orig
+        self.assertTrue(out["meta"]["aborted_early"])
+        self.assertEqual(self.calls, 5)                     # 1155회를 다 돌지 않는다
+        self.assertEqual(len(out["meta"]["failures"]), 5)
+
+    def test_recovery_resets_the_counter(self):
+        # 실패가 흩어져 있으면(중간에 성공이 끼면) 중단하지 않고 끝까지 간다
+        seq = []
+
+        def flaky(cfg, code, ymd):
+            seq.append(1)
+            if len(seq) % 3:
+                raise fetch.ApiError("timed out")
+            return [], 0
+
+        with tempfile.TemporaryDirectory() as d:
+            orig = fetch.fetch_month_raw
+            fetch.fetch_month_raw = flaky
+            try:
+                out = fetch.collect(self.cfg, months=2, sido="인천광역시",
+                                    cache_dir=d, verbose=False,
+                                    max_consecutive_failures=5)
+            finally:
+                fetch.fetch_month_raw = orig
+        self.assertFalse(out["meta"]["aborted_early"])
+        self.assertEqual(len(seq), 20)                      # 인천 10개 시군구 x 2개월
 
 
 if __name__ == "__main__":

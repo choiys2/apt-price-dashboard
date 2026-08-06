@@ -71,7 +71,10 @@ def main():
         json.dump(full, f, ensure_ascii=False, separators=(",", ":"))
     m = full["meta"]
     print(f"  -> {trades_path}: 거래 {m['record_count']:,}건, "
-          f"API 호출 {m['api_calls']}회, 실패 {len(m['failures'])}건")
+          f"API 호출 {m['api_calls']}회, 캐시 {m['cache_hits']}회, 실패 {len(m['failures'])}건")
+    if m.get("aborted_early"):
+        print("  ! 연속 실패로 수집을 조기 중단했다. 받아둔 캐시는 저장됐으니 "
+              "다시 실행하면 이어받는다.", file=sys.stderr)
 
     # 건전성 체크: 시군구당 월 5건은 가장 한산한 군 지역 기준으로도 밑도는 수치다.
     threshold = args.min_records if args.min_records is not None else n_regions * args.months * 5

@@ -65,6 +65,11 @@ def load_config(path=CONFIG_PATH):
     # data.go.kr 은 응답이 느릴 때가 있다. 20초로는 부족해 첫 실측이 전부 타임아웃했다.
     cfg.setdefault("timeout_sec", 60)
     cfg.setdefault("retries", 3)
+    # 대량 수집은 진단과 정책이 달라야 한다. 연결이 되는 러너에서는 0.4~1.0초에
+    # 응답이 오므로 15초면 충분하고, 막힌 러너에서는 어차피 몇 번을 더 기다려도
+    # 안 온다. 60초 x 4회(=실패 1건당 4분)로 두면 실패율 10%에 8시간이 넘는다.
+    cfg.setdefault("bulk_timeout_sec", 15)
+    cfg.setdefault("bulk_retries", 1)
     if not cfg.get("service_key") or cfg["service_key"].startswith("YOUR_"):
         raise SystemExit(
             "서비스키가 없다. apt_config.json 의 service_key 를 채우거나 "
@@ -113,12 +118,15 @@ def request_once(url, timeout, headers=None):
     return body, time.monotonic() - started
 
 
-def call_api(cfg, lawd_cd, deal_ymd, page_no=1, base_url=None, num_of_rows=None):
+def call_api(cfg, lawd_cd, deal_ymd, page_no=1, base_url=None, num_of_rows=None,
+             timeout=None, retries=None):
     url = build_url(cfg, lawd_cd, deal_ymd, page_no, base_url, num_of_rows)
+    timeout = timeout or cfg["timeout_sec"]
+    retries = cfg["retries"] if retries is None else retries
     last_err = None
-    for attempt in range(cfg["retries"] + 1):
+    for attempt in range(retries + 1):
         try:
-            body, _ = request_once(url, cfg["timeout_sec"])
+            body, _ = request_once(url, timeout)
             return body
         except (URLError, HTTPError, OSError) as e:
             last_err = e
@@ -126,7 +134,7 @@ def call_api(cfg, lawd_cd, deal_ymd, page_no=1, base_url=None, num_of_rows=None)
             time.sleep(5 if getattr(e, "code", None) == 429 else 1.5 * (attempt + 1))
     raise ApiError(f"네트워크 오류: {type(last_err).__name__}: {last_err} "
                    f"(LAWD_CD={lawd_cd}, DEAL_YMD={deal_ymd}, "
-                   f"timeout={cfg['timeout_sec']}s x {cfg['retries'] + 1}회)")
+                   f"timeout={timeout}s x {retries + 1}회)")
 
 
 def _mask_key(text, cfg):
@@ -178,12 +186,13 @@ def parse_response(xml_text):
 
 def fetch_month_raw(cfg, lawd_cd, deal_ymd):
     """한 시군구·한 달의 전체 거래를 페이지네이션으로 모두 받아 raw dict 목록으로 반환."""
-    items, total = parse_response(call_api(cfg, lawd_cd, deal_ymd, page_no=1))
+    bulk = {"timeout": cfg["bulk_timeout_sec"], "retries": cfg["bulk_retries"]}
+    items, total = parse_response(call_api(cfg, lawd_cd, deal_ymd, page_no=1, **bulk))
     page = 1
     while len(items) < total:
         page += 1
         time.sleep(cfg["request_interval_sec"])
-        more, _ = parse_response(call_api(cfg, lawd_cd, deal_ymd, page_no=page))
+        more, _ = parse_response(call_api(cfg, lawd_cd, deal_ymd, page_no=page, **bulk))
         if not more:
             break
         items.extend(more)
@@ -308,7 +317,14 @@ def month_range(months, end=None):
     return sorted(out)
 
 
-def collect(cfg, months=15, sido=None, cache_dir=CACHE_DIR, refresh_months=3, verbose=True):
+# 연속 실패가 이만큼 쌓이면 러너가 통째로 막힌 것으로 보고 중단한다. data.go.kr 은
+# 러너에 따라 아예 연결이 안 되는 경우가 있는데, 그때는 남은 수천 건을 계속 시도해도
+# 전부 타임아웃만 태울 뿐이다. 받아둔 캐시는 그대로 남으므로 다음 실행이 이어받는다.
+MAX_CONSECUTIVE_FAILURES = 8
+
+
+def collect(cfg, months=15, sido=None, cache_dir=CACHE_DIR, refresh_months=3, verbose=True,
+            max_consecutive_failures=MAX_CONSECUTIVE_FAILURES):
     targets = regions(sido)
     ymds = month_range(months)
     refresh_set = set(ymds[-refresh_months:]) if refresh_months > 0 else set()
@@ -317,8 +333,12 @@ def collect(cfg, months=15, sido=None, cache_dir=CACHE_DIR, refresh_months=3, ve
     api_calls = cache_hits = 0
     total_jobs = len(targets) * len(ymds)
     done = 0
+    consecutive_failures = 0
+    aborted = False
 
     for code, _sido, sgg in targets:
+        if aborted:
+            break
         for ymd in ymds:
             done += 1
             cached = None if ymd in refresh_set else load_cache(cache_dir, code, ymd)
@@ -330,10 +350,20 @@ def collect(cfg, months=15, sido=None, cache_dir=CACHE_DIR, refresh_months=3, ve
                     items, total = fetch_month_raw(cfg, code, ymd)
                 except ApiError as e:
                     failures.append({"lawd_cd": code, "deal_ymd": ymd, "error": str(e)})
+                    consecutive_failures += 1
                     if verbose:
-                        print(f"  ! {code} {ymd} 실패: {e}", file=sys.stderr)
+                        print(f"  ! {code} {ymd} 실패({consecutive_failures}연속): {e}",
+                              file=sys.stderr)
+                    if consecutive_failures >= max_consecutive_failures:
+                        print(f"\n[중단] {consecutive_failures}회 연속 실패. 이 러너에서 "
+                              f"data.go.kr 에 닿지 않는 것으로 보고 수집을 멈춘다. "
+                              f"여기까지 받은 캐시는 저장돼 다음 실행이 이어받는다.",
+                              file=sys.stderr)
+                        aborted = True
+                        break
                     time.sleep(cfg["request_interval_sec"])
                     continue
+                consecutive_failures = 0
                 api_calls += 1
                 save_cache(cache_dir, code, ymd, items, total)
                 time.sleep(cfg["request_interval_sec"])
@@ -347,6 +377,7 @@ def collect(cfg, months=15, sido=None, cache_dir=CACHE_DIR, refresh_months=3, ve
             print(f"  [{done}/{total_jobs}] {region_name(code)} 누적 {len(records):,}건")
 
     meta = {
+        "aborted_early": aborted,
         "generated_at": date.today().isoformat(),
         "months": ymds,
         "regions": len(targets),
