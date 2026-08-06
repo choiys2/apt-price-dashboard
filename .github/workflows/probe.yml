@@ -30,10 +30,24 @@ jobs:
       - name: 시군구 코드 테이블 확인
         run: python lawd_codes.py
 
-      - name: 실거래가 API 단일 호출 (원본 XML + 필드명 출력)
+      # 호스트에 닿기는 하는지부터 본다. 여기서 막히면 애플리케이션 레벨 문제가 아니라
+      # 러너에서 data.go.kr 로 나가는 경로 자체가 안 되는 것이다.
+      - name: 네트워크 도달 확인 (DNS / TCP / TLS)
+        continue-on-error: true
+        run: |
+          echo "--- DNS ---"; getent hosts apis.data.go.kr || echo "DNS 실패"
+          echo "--- HTTPS (10초) ---"
+          curl -sS -o /dev/null -w "HTTP %{http_code}, 접속 %{time_connect}s, 전체 %{time_total}s\n" \
+            --max-time 10 "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade" || echo "HTTPS 실패"
+          echo "--- HTTP 평문 (10초) ---"
+          curl -sS -o /dev/null -w "HTTP %{http_code}, 접속 %{time_connect}s, 전체 %{time_total}s\n" \
+            --max-time 10 "http://apis.data.go.kr/1613000/RTMSDataSvcAptTrade" || echo "HTTP 실패"
+
+      - name: 실거래가 API 실측 (HTTPS/HTTP·페이지크기 변형)
         env:
           MOLIT_SERVICE_KEY: ${{ secrets.MOLIT_SERVICE_KEY }}
         run: |
           python fetch_apt_trades.py probe \
             --lawd "${{ inputs.lawd }}" \
-            --ymd "${{ inputs.ymd }}"
+            --ymd "${{ inputs.ymd }}" \
+            --timeout 60

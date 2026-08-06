@@ -58,8 +58,9 @@ def load_config(path=CONFIG_PATH):
     cfg.setdefault("operation", "getRTMSDataSvcAptTrade")
     cfg.setdefault("num_of_rows", 1000)
     cfg.setdefault("request_interval_sec", 0.12)
-    cfg.setdefault("timeout_sec", 20)
-    cfg.setdefault("retries", 2)
+    # data.go.kr 은 응답이 느릴 때가 있다. 20초로는 부족해 첫 실측이 전부 타임아웃했다.
+    cfg.setdefault("timeout_sec", 60)
+    cfg.setdefault("retries", 3)
     if not cfg.get("service_key") or cfg["service_key"].startswith("YOUR_"):
         raise SystemExit(
             "서비스키가 없다. apt_config.json 의 service_key 를 채우거나 "
@@ -75,25 +76,40 @@ class ApiError(RuntimeError):
     pass
 
 
-def call_api(cfg, lawd_cd, deal_ymd, page_no=1):
+def build_url(cfg, lawd_cd, deal_ymd, page_no=1, base_url=None, num_of_rows=None):
     params = {
         "serviceKey": cfg["service_key"],
         "LAWD_CD": lawd_cd,
         "DEAL_YMD": deal_ymd,
         "pageNo": page_no,
-        "numOfRows": cfg["num_of_rows"],
+        "numOfRows": num_of_rows or cfg["num_of_rows"],
     }
-    url = f"{cfg['base_url']}/{cfg['operation']}?{urlencode(params)}"
+    base = base_url or cfg["base_url"]
+    return f"{base}/{cfg['operation']}?{urlencode(params)}"
+
+
+def request_once(url, timeout):
+    """단발 호출. (응답본문, 소요초) 반환. 재시도하지 않는다(진단용)."""
+    started = time.monotonic()
+    with urlopen(url, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8")
+    return body, time.monotonic() - started
+
+
+def call_api(cfg, lawd_cd, deal_ymd, page_no=1, base_url=None, num_of_rows=None):
+    url = build_url(cfg, lawd_cd, deal_ymd, page_no, base_url, num_of_rows)
     last_err = None
     for attempt in range(cfg["retries"] + 1):
         try:
-            with urlopen(url, timeout=cfg["timeout_sec"]) as resp:
-                return resp.read().decode("utf-8")
-        except (URLError, HTTPError) as e:
+            body, _ = request_once(url, cfg["timeout_sec"])
+            return body
+        except (URLError, HTTPError, OSError) as e:
             last_err = e
             # 429(요청 과다)는 짧은 재시도로 안 풀리는 경우가 많아 더 오래 쉰다.
             time.sleep(5 if getattr(e, "code", None) == 429 else 1.5 * (attempt + 1))
-    raise ApiError(f"네트워크 오류: {last_err} (LAWD_CD={lawd_cd}, DEAL_YMD={deal_ymd})")
+    raise ApiError(f"네트워크 오류: {type(last_err).__name__}: {last_err} "
+                   f"(LAWD_CD={lawd_cd}, DEAL_YMD={deal_ymd}, "
+                   f"timeout={cfg['timeout_sec']}s x {cfg['retries'] + 1}회)")
 
 
 def _mask_key(text, cfg):
@@ -330,9 +346,49 @@ def collect(cfg, months=15, sido=None, cache_dir=CACHE_DIR, refresh_months=3, ve
 # CLI
 # --------------------------------------------------------------------------
 def cmd_probe(args):
+    """진단 모드.
+
+    첫 실측에서 요청이 전부 타임아웃해 원인이 무엇인지(호스트 도달 불가 / 특정 스킴만
+    막힘 / 응답이 느릴 뿐 / 파라미터 오류) 구분되지 않았다. 변형을 순서대로 시도하면서
+    각각의 소요 시간과 결과를 남겨, 어디까지 되는지 로그만 보고 판단할 수 있게 한다.
+    """
     cfg = load_config(args.config)
-    xml_text = call_api(cfg, args.lawd, args.ymd, page_no=1)
-    print("=" * 70)
+    print(f"엔드포인트: {cfg['base_url']}/{cfg['operation']}")
+    print(f"인증키: 길이 {len(cfg['service_key'])}자, "
+          f"앞 4자 {cfg['service_key'][:4]}… (값은 출력하지 않는다)")
+    print(f"타임아웃 {args.timeout}초, 변형별 1회씩만 시도\n")
+
+    https_base = cfg["base_url"]
+    http_base = https_base.replace("https://", "http://", 1)
+    variants = [
+        ("① HTTPS, numOfRows=10", {"base_url": https_base, "num_of_rows": 10}),
+        ("② HTTPS, numOfRows=1000", {"base_url": https_base, "num_of_rows": 1000}),
+        ("③ HTTP(평문), numOfRows=10", {"base_url": http_base, "num_of_rows": 10}),
+    ]
+
+    xml_text = None
+    for label, kw in variants:
+        url = build_url(cfg, args.lawd, args.ymd, 1, **kw)
+        try:
+            body, elapsed = request_once(url, args.timeout)
+            print(f"{label}: 성공 ({elapsed:.1f}초, {len(body):,}바이트)")
+            if xml_text is None:
+                xml_text = body
+        except Exception as e:                      # noqa: BLE001 - 진단이라 전부 잡는다
+            print(f"{label}: 실패 — {type(e).__name__}: {e}")
+
+    if xml_text is None:
+        print("\n" + "=" * 70)
+        print("세 변형 모두 실패했다. 응답 자체가 오지 않았으므로 필드명은 확인할 수 없다.")
+        print("확인할 것:")
+        print("  - data.go.kr 마이페이지에서 '아파트 매매 실거래가 자료' 활용신청이")
+        print("    승인 상태인지 (신청 직후 1~2시간 반영 지연이 있다)")
+        print("  - data.go.kr 포털의 해당 API 상세 화면에서 '미리보기'가 응답하는지")
+        print("  - HTTP(③)만 성공했다면 base_url 을 http 로 내리면 된다")
+        print("=" * 70)
+        raise SystemExit(1)
+
+    print("\n" + "=" * 70)
     print(f"RAW XML (앞 1500자) — LAWD_CD={args.lawd} DEAL_YMD={args.ymd}")
     print("=" * 70)
     print(_mask_key(xml_text[:1500], cfg))
@@ -376,9 +432,10 @@ def main():
     ap.add_argument("--config", default=CONFIG_PATH)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("probe", help="단일 시군구·월 호출해 원본 XML과 필드명 확인")
+    p = sub.add_parser("probe", help="HTTPS/HTTP·페이지크기 변형을 시도해 응답과 필드명 확인")
     p.add_argument("--lawd", default="11680", help="시군구 법정동코드 5자리 (기본: 강남구)")
     p.add_argument("--ymd", default=month_range(2)[0], help="계약연월 YYYYMM (기본: 지난달)")
+    p.add_argument("--timeout", type=int, default=60, help="변형별 타임아웃 초 (기본 60)")
     p.set_defaults(func=cmd_probe)
 
     p = sub.add_parser("fetch", help="범위 전체 수집")
