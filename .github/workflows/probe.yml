@@ -35,6 +35,11 @@ jobs:
       - name: 네트워크 도달 확인 (DNS / TCP / TLS)
         continue-on-error: true
         run: |
+          echo "--- 러너 공인 IP (data.go.kr 이 보는 출발지) ---"
+          curl -sS --max-time 10 https://api.ipify.org || echo "(확인 실패)"; echo
+          echo "--- 대조군: 국내 호스트(www.data.go.kr) 도달 여부 ---"
+          curl -sS -o /dev/null -w "HTTP %{http_code}, 접속 %{time_connect}s\n" \
+            --max-time 10 "https://www.data.go.kr" || echo "포털 본체도 실패"
           echo "--- DNS ---"; getent hosts apis.data.go.kr || echo "DNS 실패"
           echo "--- HTTPS (10초) ---"
           curl -sS -o /dev/null -w "HTTP %{http_code}, 접속 %{time_connect}s, 전체 %{time_total}s\n" \

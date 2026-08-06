@@ -54,6 +54,10 @@ def load_config(path=CONFIG_PATH):
     env_key = os.environ.get("MOLIT_SERVICE_KEY")
     if env_key:
         cfg["service_key"] = env_key
+    # GitHub Secret 이나 설정 파일에 붙여넣을 때 줄바꿈·공백이 딸려오는 일이 잦다.
+    # 그대로 두면 URL 에 %0A 로 실려 나가 인증이 조용히 실패한다.
+    if cfg.get("service_key"):
+        cfg["service_key"] = cfg["service_key"].strip()
     cfg.setdefault("base_url", "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade")
     cfg.setdefault("operation", "getRTMSDataSvcAptTrade")
     cfg.setdefault("num_of_rows", 1000)
