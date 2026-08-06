@@ -51,8 +51,14 @@ jobs:
 
       # 과거 월의 원본은 확정값이라 한 번 받아두면 다시 안 받는다. 캐시를 저장소에
       # 누적해두면 매일 도는 건 최근 3개월분(약 230회 호출)뿐이다.
+      #
+      # 건전성 실패와 무관하게 항상 커밋한다. data.go.kr 이 러너에 따라 간헐적으로
+      # 연결을 끊는 것이 실측됐는데(같은 커밋에서 어떤 러너는 타임아웃, 어떤 러너는
+      # 0.4초 응답), 그때 받다 만 캐시까지 버리면 다음 실행이 처음부터 다시 받아야
+      # 한다. 원본 캐시는 부분적이어도 그 자체로 유효하므로 남겨서 누적시킨다.
+      # (배포는 여전히 healthy 일 때만 한다 - 빈 대시보드가 나가는 건 별개로 막는다.)
       - name: 원본 캐시 커밋 (data/raw)
-        if: steps.pipeline.outputs.healthy == 'true'
+        if: always()
         continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
