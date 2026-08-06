@@ -32,7 +32,7 @@ import xml.etree.ElementTree as ET
 from datetime import date
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from lawd_codes import REGIONS, region_name, regions
 
@@ -88,10 +88,23 @@ def build_url(cfg, lawd_cd, deal_ymd, page_no=1, base_url=None, num_of_rows=None
     return f"{base}/{cfg['operation']}?{urlencode(params)}"
 
 
-def request_once(url, timeout):
+# 파이썬 기본 UA(Python-urllib/3.x)를 걸러내는 게이트웨이가 있을 수 있어 브라우저 UA를 쓴다.
+# 다만 UA 필터는 보통 403을 즉시 돌려주지 무응답 타임아웃을 내지 않으므로, 이것만으로
+# 러너 타임아웃이 풀릴 가능성은 높지 않다. 비용이 싸서 먼저 배제해 두는 것이다.
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+    "Accept": "application/xml,text/xml,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Connection": "close",
+}
+
+
+def request_once(url, timeout, headers=None):
     """단발 호출. (응답본문, 소요초) 반환. 재시도하지 않는다(진단용)."""
     started = time.monotonic()
-    with urlopen(url, timeout=timeout) as resp:
+    req = Request(url, headers=headers if headers is not None else BROWSER_HEADERS)
+    with urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8")
     return body, time.monotonic() - started
 
@@ -360,17 +373,19 @@ def cmd_probe(args):
 
     https_base = cfg["base_url"]
     http_base = https_base.replace("https://", "http://", 1)
+    urllib_ua = {"User-Agent": "Python-urllib/3.12"}
     variants = [
-        ("① HTTPS, numOfRows=10", {"base_url": https_base, "num_of_rows": 10}),
-        ("② HTTPS, numOfRows=1000", {"base_url": https_base, "num_of_rows": 1000}),
-        ("③ HTTP(평문), numOfRows=10", {"base_url": http_base, "num_of_rows": 10}),
+        ("① HTTPS, 브라우저 UA, numOfRows=10", https_base, 10, BROWSER_HEADERS),
+        ("② HTTPS, 브라우저 UA, numOfRows=1000", https_base, 1000, BROWSER_HEADERS),
+        ("③ HTTPS, 기본 UA(Python-urllib)", https_base, 10, urllib_ua),
+        ("④ HTTP(평문), 브라우저 UA", http_base, 10, BROWSER_HEADERS),
     ]
 
     xml_text = None
-    for label, kw in variants:
-        url = build_url(cfg, args.lawd, args.ymd, 1, **kw)
+    for label, base, rows, headers in variants:
+        url = build_url(cfg, args.lawd, args.ymd, 1, base_url=base, num_of_rows=rows)
         try:
-            body, elapsed = request_once(url, args.timeout)
+            body, elapsed = request_once(url, args.timeout, headers=headers)
             print(f"{label}: 성공 ({elapsed:.1f}초, {len(body):,}바이트)")
             if xml_text is None:
                 xml_text = body
@@ -379,12 +394,12 @@ def cmd_probe(args):
 
     if xml_text is None:
         print("\n" + "=" * 70)
-        print("세 변형 모두 실패했다. 응답 자체가 오지 않았으므로 필드명은 확인할 수 없다.")
-        print("확인할 것:")
-        print("  - data.go.kr 마이페이지에서 '아파트 매매 실거래가 자료' 활용신청이")
-        print("    승인 상태인지 (신청 직후 1~2시간 반영 지연이 있다)")
-        print("  - data.go.kr 포털의 해당 API 상세 화면에서 '미리보기'가 응답하는지")
-        print("  - HTTP(③)만 성공했다면 base_url 을 http 로 내리면 된다")
+        print("모든 변형이 실패했다. 응답 자체가 오지 않았으므로 필드명은 확인할 수 없다.")
+        print("활용신청이 승인 상태이고 국내 브라우저에서는 정상 호출되는 것이 확인됐으므로,")
+        print("남은 원인은 이 러너에서 data.go.kr 로 나가는 경로가 막혀 있다는 것이다.")
+        print("위의 '네트워크 도달 확인' 스텝에서 TCP 접속(time_connect)이 0이면 IP 차단,")
+        print("접속은 되는데 응답만 없으면 게이트웨이가 요청을 삼키는 것이다.")
+        print("어느 쪽이든 수집을 국내 IP에서 돌리는 구조로 바꿔야 한다.")
         print("=" * 70)
         raise SystemExit(1)
 
