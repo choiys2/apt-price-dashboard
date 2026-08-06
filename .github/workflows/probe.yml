@@ -1,0 +1,39 @@
+name: API 실측 확인 (probe)
+
+# 로컬/에이전트 환경에서는 apis.data.go.kr 아웃바운드가 막혀 있어 실제 응답을 볼 수 없다.
+# 이 워크플로를 수동 실행해 인증키가 살아 있는지, 응답 필드명이 코드의 가정과 맞는지 확인한다.
+on:
+  workflow_dispatch:
+    inputs:
+      lawd:
+        description: "시군구 법정동코드 5자리 (예: 11680 강남구, 41135 성남시 분당구)"
+        required: true
+        default: "11680"
+      ymd:
+        description: "계약연월 YYYYMM (예: 202606)"
+        required: true
+        default: "202606"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 파서 단위 테스트 (네트워크 불필요)
+        run: python test_parse.py
+
+      - name: 시군구 코드 테이블 확인
+        run: python lawd_codes.py
+
+      - name: 실거래가 API 단일 호출 (원본 XML + 필드명 출력)
+        env:
+          MOLIT_SERVICE_KEY: ${{ secrets.MOLIT_SERVICE_KEY }}
+        run: |
+          python fetch_apt_trades.py probe \
+            --lawd "${{ inputs.lawd }}" \
+            --ymd "${{ inputs.ymd }}"

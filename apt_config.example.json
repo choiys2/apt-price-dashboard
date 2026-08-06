@@ -1,0 +1,10 @@
+{
+  "_설명": "국토부 아파트 매매 실거래가 API 접속 설정 템플릿. 실제 인증키는 절대 이 파일(깃 커밋 대상)에 넣지 않는다 — 로컬은 apt_config.json(gitignore됨)에, CI는 GitHub Secrets(MOLIT_SERVICE_KEY)에 보관하고 fetch_apt_trades.load_config()가 환경변수로 덮어쓴다.",
+  "service_key": "YOUR_DATA_GO_KR_SERVICE_KEY_HERE",
+  "base_url": "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade",
+  "operation": "getRTMSDataSvcAptTrade",
+  "num_of_rows": 1000,
+  "request_interval_sec": 0.12,
+  "timeout_sec": 20,
+  "retries": 2
+}
