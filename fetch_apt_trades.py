@@ -457,6 +457,49 @@ def cmd_probe(args):
         print("거래 0건 (해당 지역·월에 신고된 매매가 없거나 파라미터 확인 필요)")
 
 
+def cmd_discover(args):
+    """코드 범위를 훑어 실제로 거래가 잡히는 시군구 코드를 찾는다.
+
+    행정구역 개편으로 lawd_codes.py 의 코드가 현행과 어긋나면 API 가 오류 없이
+    totalCount=0 을 돌려줘 그 지역이 조용히 통째로 빠진다. 실제로 수도권 백필에서
+    인천 중구·동구·서구·옹진군, 경기 부천시·화성시가 0건으로 나왔다.
+
+    코드를 추측하지 않고 범위를 실제로 호출해 확인한다. 응답의 estateAgentSggNm 에
+    "인천 서구" 같은 사람이 읽는 지역명이 들어 있어 코드-이름 대응까지 함께 얻는다.
+    """
+    cfg = load_config(args.config)
+    known = {code for code, _, _ in REGIONS}
+    bulk = {"timeout": cfg["bulk_timeout_sec"], "retries": cfg["bulk_retries"]}
+    found, checked, failed = [], 0, 0
+
+    for code in range(args.start, args.end + 1, args.step):
+        code = f"{code:05d}"
+        checked += 1
+        try:
+            items, total = parse_response(
+                call_api(cfg, code, args.ymd, num_of_rows=1, **bulk))
+        except ApiError:
+            failed += 1
+            continue
+        if total <= 0:
+            continue
+        name = items[0].get("estateAgentSggNm", "") if items else ""
+        umd = items[0].get("umdNm", "") if items else ""
+        mark = "" if code in known else "  <-- 테이블에 없는 코드"
+        print(f"  {code}  거래 {total:>5,}건  {name:<12} (예: {umd}){mark}")
+        found.append((code, name, total, code in known))
+        time.sleep(cfg["request_interval_sec"])
+
+    print(f"\n{checked}개 코드 확인 / 거래 있는 코드 {len(found)}개 / 호출 실패 {failed}개")
+    new_codes = [f for f in found if not f[3]]
+    if new_codes:
+        print("\nlawd_codes.py 에 없는 코드:")
+        for code, name, total, _ in new_codes:
+            print(f'    ("{code}", "?", "{name}"),   # {total:,}건')
+    else:
+        print("\n테이블에 없는 코드는 발견되지 않았다.")
+
+
 def cmd_fetch(args):
     cfg = load_config(args.config)
     print(f"수집 시작: {args.months}개월 × {len(regions(args.sido))}개 시군구 "
@@ -487,6 +530,13 @@ def main():
     p.add_argument("--ymd", default=month_range(2)[0], help="계약연월 YYYYMM (기본: 지난달)")
     p.add_argument("--timeout", type=int, default=60, help="변형별 타임아웃 초 (기본 60)")
     p.set_defaults(func=cmd_probe)
+
+    p = sub.add_parser("discover", help="코드 범위를 훑어 실제 거래가 잡히는 시군구 코드를 찾는다")
+    p.add_argument("--start", type=int, required=True, help="시작 코드 (예: 28100)")
+    p.add_argument("--end", type=int, required=True, help="끝 코드 (예: 28800)")
+    p.add_argument("--step", type=int, default=5, help="증분 (기본 5)")
+    p.add_argument("--ymd", default=month_range(4)[0], help="확인에 쓸 계약연월 YYYYMM")
+    p.set_defaults(func=cmd_discover)
 
     p = sub.add_parser("fetch", help="범위 전체 수집")
     p.add_argument("--months", type=int, default=15,

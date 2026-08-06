@@ -1,0 +1,42 @@
+name: 시군구 코드 실측 탐색 (discover)
+
+# 행정구역 개편으로 lawd_codes.py 의 코드가 현행과 어긋나면 API 가 오류 없이
+# totalCount=0 을 돌려줘 그 지역이 조용히 통째로 빠진다. 코드를 추측하지 않고
+# 범위를 실제로 호출해 확인한다.
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "시작 코드 (예: 28100)"
+        required: true
+        default: "28100"
+      end:
+        description: "끝 코드 (예: 28800)"
+        required: true
+        default: "28800"
+      step:
+        description: "증분 (기본 5)"
+        required: true
+        default: "5"
+      ymd:
+        description: "확인에 쓸 계약연월 YYYYMM"
+        required: true
+        default: "202605"
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 코드 범위 탐색
+        env:
+          MOLIT_SERVICE_KEY: ${{ secrets.MOLIT_SERVICE_KEY }}
+        run: |
+          python fetch_apt_trades.py discover \
+            --start "${{ inputs.start }}" \
+            --end "${{ inputs.end }}" \
+            --step "${{ inputs.step }}" \
+            --ymd "${{ inputs.ymd }}"
