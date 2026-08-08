@@ -63,7 +63,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/raw data/rent
+          # 디렉터리가 아직 없으면 git add 가 exit 128 로 죽어 스텝 전체가 실패한다.
+          # 그러면 같이 넘기려던 매매 캐시 진척까지 통째로 버려진다(실측: 전월세 수집이
+          # 시작조차 못 한 실행에서 data/rent 가 없어 그렇게 됐다).
+          mkdir -p data/raw data/rent
+          git add -A data
           git diff --cached --quiet || git commit -m "chore: 실거래 원본 캐시 갱신 $(date -u +%F)"
           git push || true
 
