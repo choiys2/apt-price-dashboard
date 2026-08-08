@@ -104,6 +104,11 @@ def main():
             json.dump(rent_payload, f, ensure_ascii=False, separators=(",", ":"))
         print(f"  -> {rent_path}: 전월세 {rm['record_count']:,}건 "
               f"(전세 {rm['jeonse_count']:,}건), API {rm['api_calls']}회")
+        if rm["record_count"] == 0:
+            first = rm["failures"][0]["error"] if rm["failures"] else "(실패 기록 없음)"
+            print("  ! 전월세가 0건이다. 전세가율은 산출되지 않는다.\n"
+                  f"    첫 실패: {first}", file=sys.stderr)
+            rent_payload = None
 
     print("[2/3] 집계")
     analytics = analyze(full, expected_regions=regions(args.sido), rent_payload=rent_payload)

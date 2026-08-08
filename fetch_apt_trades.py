@@ -129,6 +129,14 @@ def call_api(cfg, lawd_cd, deal_ymd, page_no=1, base_url=None, num_of_rows=None,
             body, _ = request_once(url, timeout)
             return body
         except (URLError, HTTPError, OSError) as e:
+            # 403은 인증키가 이 서비스에 등록되지 않았다는 뜻이라 재시도로 풀리지 않는다.
+            # 일반 실패로 처리하면 월마다 조용히 건너뛰다 0건으로 끝나 원인이 안 드러난다
+            # (실측: 전월세 서비스가 전부 403인데 "수집 0건"으로만 보였다).
+            if getattr(e, "code", None) == 403:
+                raise ApiError(
+                    f"HTTP 403 - 인증키가 이 서비스에 등록되지 않았다. "
+                    f"data.go.kr 에서 해당 API 활용신청이 승인됐는지 확인할 것. "
+                    f"(endpoint={base_url or cfg['base_url']})") from e
             last_err = e
             # 429(요청 과다)는 짧은 재시도로 안 풀리는 경우가 많아 더 오래 쉰다.
             time.sleep(5 if getattr(e, "code", None) == 429 else 1.5 * (attempt + 1))
