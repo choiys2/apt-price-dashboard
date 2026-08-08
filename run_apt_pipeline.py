@@ -37,6 +37,9 @@ def main():
     ap.add_argument("--min-records", type=int, default=None,
                     help="이 건수 미만이면 비정상으로 보고 exit 2. "
                          "기본값은 시군구 수 x 개월 x 5")
+    ap.add_argument("--max-missing-regions", type=int, default=2,
+                    help="거래 0건 시군구가 이 수를 넘으면 코드 테이블이 어긋난 것으로 보고 "
+                         "exit 3 (기본 2 - 옹진군처럼 실제로 거래가 없는 지역 여유분)")
     ap.add_argument("--sample", action="store_true",
                     help="API 대신 합성 데이터를 써서 화면만 확인한다")
     args = ap.parse_args()
@@ -86,7 +89,21 @@ def main():
         raise SystemExit(2)
 
     print("[2/3] 집계")
-    analytics = analyze(full)
+    analytics = analyze(full, expected_regions=regions(args.sido))
+
+    # D-1: 행정구역 개편으로 코드가 폐지되면 API 는 오류 없이 totalCount=0 을 돌려준다.
+    # 실패로 잡히지 않아 지역이 통째로 조용히 빠지므로(2026-08-06 에 6개 지역이 이렇게
+    # 사라졌다) 여기서 명시적으로 막는다. 거래가 거의 없는 군 지역이 있을 수 있어
+    # 몇 개까지는 허용하되, 그 이상이면 코드 테이블이 어긋난 것으로 본다.
+    missing = analytics["meta"]["missing_regions"]
+    if missing:
+        print(f"\n  ! 거래 0건 시군구 {len(missing)}개: "
+              + ", ".join(m["region"] for m in missing), file=sys.stderr)
+    if len(missing) > args.max_missing_regions:
+        print(f"[중단] 거래 0건 시군구가 {len(missing)}개로 허용치({args.max_missing_regions})를 "
+              f"넘었다. 행정구역 개편으로 법정동코드가 폐지됐을 가능성이 높다. "
+              f"`fetch_apt_trades.py discover` 로 현행 코드를 확인할 것.", file=sys.stderr)
+        raise SystemExit(3)
     with open(analytics_path, "w", encoding="utf-8") as f:
         json.dump(analytics, f, ensure_ascii=False, separators=(",", ":"))
     k = analytics["kpi"]

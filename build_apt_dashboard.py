@@ -96,6 +96,8 @@ table{width:100%;border-collapse:collapse;font-size:13.5px;
   font-variant-numeric:tabular-nums;white-space:nowrap}
 th,td{padding:9px 11px;text-align:right;border-bottom:1px solid var(--line)}
 th:nth-child(1),td:nth-child(1),th:nth-child(2),td:nth-child(2){text-align:left}
+/* 신고가 표는 계약일·지역·단지 세 칸이 텍스트라 좌측 정렬한다 */
+table.rh th:nth-child(3),table.rh td:nth-child(3){text-align:left}
 th{color:var(--muted);font-weight:600;font-size:12.5px;cursor:pointer;
   user-select:none;position:sticky;top:0;background:var(--panel);z-index:1}
 th:hover{color:var(--text)}
@@ -137,6 +139,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
 <div id="banner"></div>
 
 <div class="filters" id="filters"></div>
+<div class="filters" id="dealfilters"></div>
 
 <section class="kpis" id="kpis"></section>
 
@@ -168,8 +171,32 @@ footer ul{padding-left:18px;margin:8px 0 0}
 </section>
 
 <section class="card">
+  <div class="table-head">
+    <h2 style="margin:0">신고가 · 신저가 갱신</h2>
+    <div class="filters" style="margin:0" id="rhtabs"></div>
+  </div>
+  <p class="sub" id="rhnote" style="margin:0 0 12px"></p>
+  <div class="scroll"><table class="rh">
+    <thead><tr>
+      <th style="cursor:default">계약일</th><th style="cursor:default">지역</th>
+      <th style="cursor:default">단지</th><th style="cursor:default">전용</th>
+      <th style="cursor:default">층</th><th style="cursor:default">거래가</th>
+      <th style="cursor:default">직전 기록</th><th style="cursor:default">갱신폭</th>
+    </tr></thead>
+    <tbody id="rhbody"></tbody>
+  </table></div>
+</section>
+
+<section class="card">
   <h2>전용면적 구간별 거래 비중 · 중위 평당가</h2>
   <div class="dist" id="dist"></div>
+</section>
+
+<section class="card">
+  <h2>거래 형태</h2>
+  <div class="dist" id="dealtype"></div>
+  <p class="sub" style="margin-top:12px">직거래는 가족 간 증여성 거래 등이 섞여 시세보다
+    낮게 신고되는 경우가 많다. 위 필터의 "중개거래만"으로 제외하고 볼 수 있다.</p>
 </section>
 
 <footer>
@@ -178,6 +205,10 @@ footer ul{padding-left:18px;margin:8px 0 0}
     <li>해제(취소) 거래는 집계에서 제외했다 — <span id="cancel-note"></span></li>
     <li>대표 단가는 <b>중위 평당가</b>다. 평균은 초고가 몇 건에 끌려가 지역 비교를 왜곡한다.</li>
     <li>실거래가는 계약일 기준 신고분이라, 최근 2개월은 신고 지연으로 거래량이 과소 집계된다(잠정치).</li>
+    <li><b>최근 달 수치는 나중에 더 내려갈 수 있다.</b> 해제(취소)도 뒤늦게 반영되기 때문이다.
+        이번 집계의 월별 해제율은 <span id="cancel-series"></span> 로 과거일수록 높은데,
+        시장이 달라진 것이 아니라 오래된 거래일수록 해제가 반영될 시간이 길었던 관측 편향이다.
+        <b>따라서 해제율 자체를 시계열로 비교해서는 안 된다.</b></li>
     <li><b>증감률의 기준월은 최신월이 아니라 마지막 확정월</b>(<span id="ref-note"></span>)이다.
         잠정치인 최신월을 확정된 전월·전년동월과 맞대면, 실제로 줄지 않았는데도 거래량이
         급감한 것처럼 보이기 때문이다.</li>
@@ -212,20 +243,28 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':
 let sido = 'ALL';
 let sortKey = 'median_ppp', sortDir = -1;
 let query = '';
+let dealType = 'all';          // 'all' | 'broker' (직거래 제외)
+let rhTab = 'highs';           // 'highs' | 'lows'
+
+// 전체본과 중개거래본은 같은 모양이라 뷰만 갈아끼운다.
+function V(){ return (dealType === 'broker' && D.broker) ? D.broker : D; }
 
 function monthlyFor(s){
-  if (s === 'ALL') return D.monthly;
-  const e = D.sido.find(x => x.sido === s);
+  const v = V();
+  if (s === 'ALL') return v.monthly;
+  const e = v.sido.find(x => x.sido === s);
   return e ? e.monthly : [];
 }
 function overallFor(s){
-  if (s === 'ALL') return {count:D.kpi.total_deals, median_ppp:D.kpi.median_ppp,
-                           median_amount:D.kpi.median_amount, avg_area:D.kpi.avg_area};
-  const e = D.sido.find(x => x.sido === s);
+  const v = V();
+  if (s === 'ALL') return {count:v.kpi.total_deals, median_ppp:v.kpi.median_ppp,
+                           median_amount:v.kpi.median_amount, avg_area:v.kpi.avg_area};
+  const e = v.sido.find(x => x.sido === s);
   return e ? e : {count:0, median_ppp:null, median_amount:null, avg_area:null};
 }
 function regionsFor(s){
-  const rows = s === 'ALL' ? D.regions : D.regions.filter(r => r.sido === s);
+  const all = V().regions;
+  const rows = s === 'ALL' ? all : all.filter(r => r.sido === s);
   return query ? rows.filter(r => r.region.includes(query)) : rows;
 }
 function change(cur, prev){
@@ -241,6 +280,18 @@ function renderFilters(){
   ).join('');
   $('#filters').querySelectorAll('.chip').forEach(b =>
     b.onclick = () => { sido = b.dataset.sido; renderAll(); });
+
+  if (!D.broker){ $('#dealfilters').innerHTML = ''; return; }
+  const dt = D.deal_type;
+  const dealOpts = [
+    ['all', `전체 거래 (${nf(D.kpi.total_deals)}건)`],
+    ['broker', `중개거래만 (직거래 ${dt.direct_share_pct}% 제외)`],
+  ];
+  $('#dealfilters').innerHTML = dealOpts.map(([v,label]) =>
+    `<button class="chip" data-deal="${v}" aria-pressed="${v===dealType}">${esc(label)}</button>`
+  ).join('');
+  $('#dealfilters').querySelectorAll('.chip').forEach(b =>
+    b.onclick = () => { dealType = b.dataset.deal; renderAll(); });
 }
 
 /* ---------- KPI ---------- */
@@ -257,7 +308,7 @@ function renderKpi(){
   const yoy = ri >= 12 ? ms[ri-12] : null;
 
   const cards = [
-    {label:`거래건수 (${D.kpi.period_from} ~ ${D.kpi.period_to})`,
+    {label:`거래건수 (${V().kpi.period_from} ~ ${V().kpi.period_to})`,
      value:nf(ov.count), unit:'건',
      foot:`기준월 ${ref.ym||'–'} ${nf(ref.count)}건 · 전월비 ${pct(change(ref.count, prev.count))}`
         + `<br><span class="muted">최신월 ${latest.ym||'–'} ${nf(latest.count)}건(잠정)</span>`},
@@ -435,6 +486,54 @@ function renderDist(){
   }).join('');
 }
 
+/* ---------- 신고가 · 신저가 ---------- */
+function renderRecordHighs(){
+  const rh = D.record_highs;
+  if (!rh){ return; }
+  const tabs = [['highs', `신고가 ${nf(rh.high_count)}건`], ['lows', `신저가 ${nf(rh.low_count)}건`]];
+  $('#rhtabs').innerHTML = tabs.map(([v,label]) =>
+    `<button class="chip" data-rh="${v}" aria-pressed="${v===rhTab}">${esc(label)}</button>`).join('');
+  $('#rhtabs').querySelectorAll('.chip').forEach(b =>
+    b.onclick = () => { rhTab = b.dataset.rh; renderRecordHighs(); });
+
+  const rows = rh[rhTab] || [];
+  $('#rhnote').textContent =
+    `${rh.window[0]} ~ ${rh.window[rh.window.length-1]} 계약분 · 단지×전용면적 타입별로 `
+    + `직전 거래 4건 이상인 경우만 · 갱신폭 순 상위 ${rows.length}건`;
+  $('#rhbody').innerHTML = rows.map(r => `<tr>
+      <td>${esc(r.deal_date.slice(2))}</td>
+      <td>${esc(r.region)}${r.umd ? ' ' + esc(r.umd) : ''}</td>
+      <td class="name">${esc(r.apt)}</td>
+      <td>${r.area_type}㎡</td>
+      <td>${r.floor ?? '–'}층</td>
+      <td>${fmtAmount(r.amount_manwon)}</td>
+      <td class="muted">${fmtAmount(r.prev)}</td>
+      <td>${pct(r.gap_pct)}</td>
+    </tr>`).join('')
+    || `<tr><td colspan="8" class="muted" style="text-align:center;padding:24px">
+        해당 기간에 갱신 거래가 없다</td></tr>`;
+}
+
+/* ---------- 거래 형태 ---------- */
+function renderDealType(){
+  const dt = D.deal_type;
+  if (!dt){ return; }
+  const total = dt.broker.count + dt.direct.count || 1;
+  const rows = [
+    ['중개거래', dt.broker, dt.broker.count / total],
+    ['직거래', dt.direct, dt.direct.count / total],
+  ];
+  $('#dealtype').innerHTML = rows.map(([label, s, share]) => `<div class="dist-row">
+      <div>${label}</div>
+      <div class="track"><div class="fill" style="width:${(share*100).toFixed(1)}%"></div></div>
+      <div class="dist-val">${(share*100).toFixed(1)}% · ${nf(s.count)}건 ·
+        <b style="color:var(--text)">${nf(s.median_ppp)}</b>만원/평</div>
+    </div>`).join('')
+    + (dt.direct_vs_broker_pct == null ? '' :
+       `<p class="sub" style="margin:6px 0 0">직거래 중위 평당가는 중개거래 대비
+        <b style="color:var(--text)">${dt.direct_vs_broker_pct}%</b></p>`);
+}
+
 /* ---------- 헤더 / 푸터 ---------- */
 function renderMeta(){
   const m = D.meta;
@@ -445,6 +544,11 @@ function renderMeta(){
     + (m.api_calls ? ` · API 호출 ${nf(m.api_calls)}회` : '');
   $('#cancel-note').textContent = `이번 집계에서 ${nf(m.excluded_canceled)}건 제외`;
   $('#ref-note').textContent = `${D.kpi.ref_month} · 최신월 ${D.kpi.latest_month}은 잠정`;
+  const cr = (D.cancel_rate || []).filter(x => x.rate_pct != null);
+  if (cr.length >= 2){
+    const a = cr[0], b = cr[cr.length-1];
+    $('#cancel-series').textContent = `${a.ym} ${a.rate_pct}% → ${b.ym} ${b.rate_pct}%`;
+  }
   $('#yoy-note').innerHTML = D.monthly.length >= 15
     ? '전년 동월 대비는 기준월과 그 12개월 전을 비교한 값이다.'
     : `현재 ${D.monthly.length}개월치만 수집해 전년 동월 대비는 산출할 수 없다. `
@@ -477,6 +581,8 @@ function renderAll(){ renderFilters(); renderKpi(); renderChart(); renderTable()
 initTheme();
 renderMeta();
 renderDist();
+renderRecordHighs();
+renderDealType();
 renderAll();
 $('#csv').onclick = downloadCsv;
 $('#q').oninput = e => { query = e.target.value.trim(); renderTable(); };

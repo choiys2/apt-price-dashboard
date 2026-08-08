@@ -22,7 +22,7 @@ from collections import defaultdict
 from datetime import date
 from statistics import median
 
-from lawd_codes import SIDO_ORDER
+from lawd_codes import REGIONS, SIDO_ORDER
 
 # 신고 지연으로 확정되지 않은 것으로 간주할 최근 개월 수
 PROVISIONAL_MONTHS = 2
@@ -77,6 +77,20 @@ def summarize(records):
         "median_amount": round(median(amounts)) if amounts else None,
         "avg_area": round(sum(areas) / len(areas), 1) if areas else None,
     }
+
+
+# 예전에 만들어둔 trades.json 에는 is_broker / area_type 이 없다. 없으면 원본 필드에서
+# 유도한다. 이게 없으면 "직거래 100%" 같은 조용히 틀린 값이 그대로 집계된다.
+def _is_broker(rec):
+    v = rec.get("is_broker")
+    return (rec.get("deal_gbn") != "직거래") if v is None else v
+
+
+def _area_type(rec):
+    v = rec.get("area_type")
+    if v is None and rec.get("area_m2"):
+        return int(rec["area_m2"])
+    return v
 
 
 def _group(records, key):
@@ -162,6 +176,99 @@ def area_distribution(records):
     return rows
 
 
+def record_highs(records, months, recent_months=3, min_history=3, top_n=60):
+    """단지 x 면적타입 단위로 신고가·신저가 갱신 거래를 찾는다.
+
+    같은 단지라도 타입이 다르면 가격대가 완전히 달라 함께 비교하면 의미가 없다.
+    전용면적을 내림해 묶은 area_type 을 키에 넣는 이유다(84.97/84.93 -> 84).
+    직전 거래가 min_history 건 미만이면 "최고가"라는 말 자체가 성립하지 않으므로 뺀다.
+    """
+    watch = set(months[-recent_months:])
+    groups = defaultdict(list)
+    for r in records:
+        atype = _area_type(r)
+        if atype and r.get("amount_manwon") is not None and r.get("apt"):
+            groups[(r["lawd_cd"], r["apt"], atype)].append(r)
+
+    highs, lows = [], []
+    for (code, apt, atype), rows in groups.items():
+        rows.sort(key=lambda r: r["deal_date"])
+        if len(rows) <= min_history:
+            continue
+        hi = lo = rows[0]["amount_manwon"]
+        for r in rows[1:]:
+            amt = r["amount_manwon"]
+            prev_hi, prev_lo = hi, lo
+            hi, lo = max(hi, amt), min(lo, amt)
+            if r["deal_ym"] not in watch:
+                continue
+            entry = {
+                "region": r["region"], "umd": r["umd"], "apt": apt,
+                "area_type": atype, "deal_date": r["deal_date"],
+                "amount_manwon": amt, "floor": r["floor"],
+                "price_per_pyeong": r["price_per_pyeong"],
+                "history_count": len(rows),
+            }
+            if amt > prev_hi:
+                highs.append({**entry, "prev": prev_hi,
+                              "gap_pct": round((amt - prev_hi) / prev_hi * 100, 1)})
+            elif amt < prev_lo:
+                lows.append({**entry, "prev": prev_lo,
+                             "gap_pct": round((amt - prev_lo) / prev_lo * 100, 1)})
+
+    highs.sort(key=lambda x: x["gap_pct"], reverse=True)
+    lows.sort(key=lambda x: x["gap_pct"])
+    return {"window": months[-recent_months:], "highs": highs[:top_n], "lows": lows[:top_n],
+            "high_count": len(highs), "low_count": len(lows)}
+
+
+def deal_type_stats(records):
+    """중개거래와 직거래를 갈라서 비교한다.
+
+    직거래는 실측에서 중개거래보다 중위 평당가가 28.5% 낮았다. 가족 간 증여성
+    거래가 섞여 있다는 신호라, 섞어서 집계하면 시세가 아래로 끌린다.
+    """
+    broker = [r for r in records if _is_broker(r)]
+    direct = [r for r in records if not _is_broker(r)]
+    b, d = summarize(broker), summarize(direct)
+    gap = None
+    if b["median_ppp"] and d["median_ppp"]:
+        gap = round((d["median_ppp"] / b["median_ppp"] - 1) * 100, 1)
+    return {
+        "broker": b, "direct": d,
+        "direct_share_pct": round(len(direct) / len(records) * 100, 2) if records else 0,
+        "direct_vs_broker_pct": gap,
+    }
+
+
+def missing_regions(records, expected):
+    """수집 대상인데 거래가 한 건도 없는 시군구.
+
+    행정구역 개편으로 코드가 폐지되면 API 는 오류 없이 totalCount=0 을 돌려준다.
+    실패로 잡히지 않아 지역이 통째로 조용히 빠지므로, 여기서 따로 드러낸다.
+    """
+    seen = {r["lawd_cd"] for r in records}
+    return [{"lawd_cd": c, "region": f"{sido} {sgg}"}
+            for c, sido, sgg in expected if c not in seen]
+
+
+def cancel_rate_series(raw_records, months):
+    """월별 해제율. 시계열로 비교하면 안 되는 지표라 경고와 함께 쓴다.
+
+    오래된 거래일수록 해제가 반영될 시간이 길었기 때문에 과거로 갈수록 높게 나온다
+    (실측: 2025-06 9.5% -> 2026-08 0.6%). 시장 변화가 아니라 관측 편향이다.
+    뒤집으면 최근 달에는 앞으로 해제로 빠질 거래가 더 남아 있다는 뜻이다.
+    """
+    total, canceled = defaultdict(int), defaultdict(int)
+    for r in raw_records:
+        total[r["deal_ym"]] += 1
+        if r.get("canceled"):
+            canceled[r["deal_ym"]] += 1
+    return [{"ym": m, "total": total.get(m, 0), "canceled": canceled.get(m, 0),
+             "rate_pct": round(canceled.get(m, 0) / total[m] * 100, 1) if total.get(m) else None}
+            for m in months]
+
+
 def build_kpi(records, months):
     ref = reference_month(months)
     prev = _prev_ym(ref)
@@ -193,15 +300,27 @@ def build_kpi(records, months):
     }
 
 
-def analyze(payload, include_canceled=False):
+def _views(records, months):
+    """한 벌의 거래 목록으로 KPI/추이/랭킹을 만든다. 전체본과 중개거래본에 같이 쓴다."""
+    return {
+        "kpi": build_kpi(records, months),
+        "monthly": monthly_series(records, months),
+        "sido": sido_rollup(records, months),
+        "regions": region_ranking(records, months),
+    }
+
+
+def analyze(payload, include_canceled=False, expected_regions=None):
     raw = payload["records"]
     records = raw if include_canceled else [r for r in raw if not r.get("canceled")]
     if not records:
         raise SystemExit("집계할 거래가 없다. 수집 결과(trades.json)를 먼저 확인할 것.")
 
     months = sorted({r["deal_ym"] for r in records})
+    broker = [r for r in records if _is_broker(r)]
+    expected = expected_regions if expected_regions is not None else REGIONS
 
-    return {
+    result = {
         "meta": {
             **payload.get("meta", {}),
             "analyzed_at": date.today().isoformat(),
@@ -209,14 +328,18 @@ def analyze(payload, include_canceled=False):
             "months": months,
             "provisional_months": months[-PROVISIONAL_MONTHS:] if PROVISIONAL_MONTHS else [],
             "ref_month": reference_month(months),
+            "missing_regions": missing_regions(records, expected),
         },
-        "kpi": build_kpi(records, months),
-        "monthly": monthly_series(records, months),
-        "sido": sido_rollup(records, months),
-        "regions": region_ranking(records, months),
+        **_views(records, months),
+        # 직거래를 뺀 시세 기준. 대시보드에서 토글로 전환한다.
+        "broker": _views(broker, months) if broker else None,
         "umd_top": umd_ranking(records),
         "area_distribution": area_distribution(records),
+        "deal_type": deal_type_stats(records),
+        "record_highs": record_highs(records, months),
+        "cancel_rate": cancel_rate_series(raw, months),
     }
+    return result
 
 
 def main():
@@ -243,6 +366,15 @@ def main():
     print(f"  최신월(잠정) {k['latest_month']}: {k['latest']['count']:,}건 — 신고 지연으로 과소 집계")
     print(f"  시군구 {len(result['regions'])}개, 상위: "
           + ", ".join(f"{r['region']}({r['median_ppp']:,})" for r in result["regions"][:3]))
+    dt = result["deal_type"]
+    print(f"  직거래 {dt['direct']['count']:,}건({dt['direct_share_pct']}%), "
+          f"중개거래 대비 평당가 {dt['direct_vs_broker_pct']}%")
+    rh = result["record_highs"]
+    print(f"  최근 {len(rh['window'])}개월 신고가 {rh['high_count']:,}건 / 신저가 {rh['low_count']:,}건")
+    missing = result["meta"]["missing_regions"]
+    if missing:
+        print(f"  ! 거래 0건 시군구 {len(missing)}개: "
+              + ", ".join(m["region"] for m in missing), file=sys.stderr)
 
 
 if __name__ == "__main__":

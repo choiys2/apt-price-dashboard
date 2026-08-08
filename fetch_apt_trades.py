@@ -295,9 +295,18 @@ def normalize(row, lawd_cd):
     if area:
         rec["price_per_m2"] = round(amount / area, 2)                      # 만원/㎡
         rec["price_per_pyeong"] = round(amount / (area / PYEONG_PER_M2))   # 만원/평
+        # 전용면적은 단지마다 소수점이 제각각이라(실측: 고유값 15,951개, 84㎡대만
+        # 2,137개) 그대로 두면 같은 단지 같은 평형도 별개로 잡혀 타입별 비교가 안 된다.
+        # 내림해서 84.97/84.93/84.89 를 모두 "84㎡형" 하나로 묶는다. 83.x 와 84.x 는
+        # 실제로 다른 타입이므로 반올림이 아니라 내림이어야 한다.
+        rec["area_type"] = int(area)
     else:
         rec["price_per_m2"] = None
         rec["price_per_pyeong"] = None
+        rec["area_type"] = None
+    # 직거래는 시세보다 크게 낮게 신고되는 경우가 많아(실측: 중개 대비 -28.5%)
+    # 가격 통계에서 분리할 수 있도록 표준화된 값으로 둔다.
+    rec["is_broker"] = rec["deal_gbn"] != "직거래"
     return rec
 
 

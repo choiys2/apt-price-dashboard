@@ -3,9 +3,10 @@
 import unittest
 
 from apt_analytics import (
-    PROVISIONAL_MONTHS, _pct_change, _prev_ym, _same_month_last_year, analyze,
-    area_distribution, build_kpi, monthly_series, reference_month, region_ranking,
-    summarize, umd_ranking,
+    PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym,
+    _same_month_last_year, analyze, area_distribution, build_kpi, cancel_rate_series,
+    deal_type_stats, missing_regions, monthly_series, record_highs, reference_month,
+    region_ranking, summarize, umd_ranking,
 )
 
 
@@ -201,6 +202,111 @@ class ReferenceMonthKpiTest(unittest.TestCase):
         result = analyze(payload)
         self.assertEqual(result["meta"]["ref_month"], "2026-03")
         self.assertEqual(result["meta"]["provisional_months"], ["2026-04", "2026-05"])
+
+
+class FallbackTest(unittest.TestCase):
+    """예전 trades.json 에 없는 필드를 원본에서 유도하는지. 없으면 조용히 틀린 값이 된다."""
+
+    def test_is_broker_derived_when_missing(self):
+        self.assertTrue(_is_broker({"deal_gbn": "중개거래"}))
+        self.assertFalse(_is_broker({"deal_gbn": "직거래"}))
+        self.assertFalse(_is_broker({"deal_gbn": "중개거래", "is_broker": False}))
+
+    def test_area_type_derived_when_missing(self):
+        self.assertEqual(_area_type({"area_m2": 84.97}), 84)   # 내림
+        self.assertEqual(_area_type({"area_m2": 83.99}), 83)   # 84형과 섞지 않는다
+        self.assertEqual(_area_type({"area_m2": 84.1, "area_type": 84}), 84)
+        self.assertIsNone(_area_type({"area_m2": None}))
+
+
+PYEONG = 3.305785
+
+
+def deal(ym, amount, apt="가나아파트", area=84.9, gbn="중개거래", code="11680"):
+    # 평당가는 금액에서 계산해야 한다. 고정값을 넣으면 금액 차이가 통계에 안 나타나
+    # 테스트가 통과해도 아무것도 검증하지 못한다.
+    ppp = round(amount / (area / PYEONG))
+    return {**rec(ym, ppp, amount=amount, area=area, code=code),
+            "apt": apt, "deal_gbn": gbn, "area_type": int(area),
+            "is_broker": gbn != "직거래", "deal_date": f"{ym}-15"}
+
+
+class RecordHighTest(unittest.TestCase):
+    MONTHS = ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06"]
+
+    def test_detects_new_high_with_gap(self):
+        rows = [deal("2026-01", 100000), deal("2026-02", 105000),
+                deal("2026-03", 102000), deal("2026-04", 110000),
+                deal("2026-05", 120000)]
+        out = record_highs(rows, self.MONTHS, recent_months=3, min_history=3)
+        self.assertEqual(out["high_count"], 2)                 # 04, 05
+        top = out["highs"][0]
+        self.assertEqual(top["amount_manwon"], 120000)
+        self.assertEqual(top["prev"], 110000)
+        self.assertAlmostEqual(top["gap_pct"], 9.1, places=1)
+
+    def test_short_history_excluded(self):
+        rows = [deal("2026-05", 100000), deal("2026-06", 200000)]
+        out = record_highs(rows, self.MONTHS, min_history=3)
+        self.assertEqual(out["high_count"], 0)                 # 표본 2건은 "최고가"가 아니다
+
+    def test_area_types_are_not_mixed(self):
+        # 같은 단지라도 59㎡ 와 84㎡ 는 가격대가 달라 섞으면 전부 신고가로 잡힌다
+        rows = ([deal(m, 60000, area=59.9) for m in self.MONTHS[:4]]
+                + [deal("2026-05", 100000, area=84.9)])
+        out = record_highs(rows, self.MONTHS, min_history=3)
+        self.assertEqual(out["high_count"], 0)
+
+    def test_only_recent_window_reported(self):
+        rows = [deal(m, 100000 + i * 1000) for i, m in enumerate(self.MONTHS)]
+        out = record_highs(rows, self.MONTHS, recent_months=2, min_history=3)
+        self.assertEqual(out["window"], ["2026-05", "2026-06"])
+        self.assertEqual(out["high_count"], 2)
+
+
+class DealTypeTest(unittest.TestCase):
+    def test_direct_share_and_gap(self):
+        rows = ([deal("2026-06", 100000) for _ in range(9)]
+                + [deal("2026-06", 50000, gbn="직거래")])
+        out = deal_type_stats(rows)
+        self.assertEqual(out["direct"]["count"], 1)
+        self.assertEqual(out["direct_share_pct"], 10.0)
+        self.assertEqual(out["direct_vs_broker_pct"], -50.0)
+
+    def test_no_direct_deals(self):
+        out = deal_type_stats([deal("2026-06", 100000)])
+        self.assertEqual(out["direct"]["count"], 0)
+        self.assertIsNone(out["direct_vs_broker_pct"])
+
+
+class MissingRegionTest(unittest.TestCase):
+    def test_lists_regions_with_no_records(self):
+        expected = [("11680", "서울특별시", "강남구"), ("41597", "경기도", "화성시 동탄구")]
+        out = missing_regions([deal("2026-06", 100000, code="11680")], expected)
+        self.assertEqual([m["lawd_cd"] for m in out], ["41597"])
+        self.assertEqual(out[0]["region"], "경기도 화성시 동탄구")
+
+
+class CancelRateTest(unittest.TestCase):
+    def test_rate_per_month_and_empty_month(self):
+        rows = [rec("2026-01", 1000), {**rec("2026-01", 1000), "canceled": True},
+                rec("2026-03", 1000)]
+        out = cancel_rate_series(rows, ["2026-01", "2026-02", "2026-03"])
+        self.assertEqual(out[0]["rate_pct"], 50.0)
+        self.assertIsNone(out[1]["rate_pct"])      # 거래 0건인 달은 비율이 없다
+        self.assertEqual(out[2]["rate_pct"], 0.0)
+
+
+class BrokerViewTest(unittest.TestCase):
+    def test_analyze_exposes_broker_only_view(self):
+        payload = {"meta": {}, "records": (
+            [deal("2026-06", 100000) for _ in range(5)]
+            + [deal("2026-06", 40000, gbn="직거래") for _ in range(5)])}
+        out = analyze(payload)
+        self.assertEqual(out["kpi"]["total_deals"], 10)
+        self.assertEqual(out["broker"]["kpi"]["total_deals"], 5)
+        # 직거래를 빼면 중위 거래가가 올라간다
+        self.assertGreater(out["broker"]["kpi"]["median_amount"], out["kpi"]["median_amount"])
 
 
 if __name__ == "__main__":
