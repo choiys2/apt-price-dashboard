@@ -48,6 +48,18 @@ jobs:
           curl -sS -o /dev/null -w "HTTP %{http_code}, 접속 %{time_connect}s, 전체 %{time_total}s\n" \
             --max-time 10 "http://apis.data.go.kr/1613000/RTMSDataSvcAptTrade" || echo "HTTP 실패"
 
+      # 전월세는 매매와 별개의 서비스(RTMSDataSvcAptRent)라 활용신청도 따로다.
+      # 미승인이면 게이트웨이가 SERVICE_ACCESS_DENIED 를 돌려주는데, 수집기는 이를
+      # 일반 실패로 처리해 조용히 0건이 된다. 여기서 응답을 직접 확인한다.
+      - name: 전월세 API 실측
+        continue-on-error: true
+        env:
+          MOLIT_SERVICE_KEY: ${{ secrets.MOLIT_SERVICE_KEY }}
+        run: |
+          python fetch_apt_rents.py probe \
+            --lawd "${{ inputs.lawd }}" \
+            --ymd "${{ inputs.ymd }}"
+
       - name: 실거래가 API 실측 (HTTPS/HTTP·페이지크기 변형)
         env:
           MOLIT_SERVICE_KEY: ${{ secrets.MOLIT_SERVICE_KEY }}
