@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 import fetch_apt_trades as fetch
+import lawd_codes
 from fetch_apt_trades import ApiError, load_cache, normalize, parse_response, save_cache, month_range
 
 OK_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -217,7 +218,9 @@ class CircuitBreakerTest(unittest.TestCase):
             finally:
                 fetch.fetch_month_raw = orig
         self.assertFalse(out["meta"]["aborted_early"])
-        self.assertEqual(len(seq), 20)                      # 인천 10개 시군구 x 2개월
+        # 시군구 수는 행정구역 개편으로 바뀌므로 테이블에서 가져온다
+        expected = len(lawd_codes.regions("인천광역시")) * 2
+        self.assertEqual(len(seq), expected)
 
 
 if __name__ == "__main__":
