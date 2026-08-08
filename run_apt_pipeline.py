@@ -19,6 +19,7 @@ import sys
 
 from apt_analytics import analyze
 from build_apt_dashboard import render
+import fetch_apt_rents
 from fetch_apt_trades import CACHE_DIR, collect, load_config
 from lawd_codes import regions
 
@@ -40,6 +41,8 @@ def main():
     ap.add_argument("--max-missing-regions", type=int, default=2,
                     help="거래 0건 시군구가 이 수를 넘으면 코드 테이블이 어긋난 것으로 보고 "
                          "exit 3 (기본 2 - 옹진군처럼 실제로 거래가 없는 지역 여유분)")
+    ap.add_argument("--with-rent", action="store_true",
+                    help="전월세도 수집해 전세가율을 산출한다 (호출량이 약 2배가 된다)")
     ap.add_argument("--sample", action="store_true",
                     help="API 대신 합성 데이터를 써서 화면만 확인한다")
     args = ap.parse_args()
@@ -88,8 +91,22 @@ def main():
             print(f"  실패 예시: {m['failures'][0]}", file=sys.stderr)
         raise SystemExit(2)
 
+    rent_payload = None
+    if args.with_rent and not args.sample:
+        print(f"[1b] 전월세 수집 ({args.months}개월 x {n_regions}개 시군구)")
+        rent_cfg = fetch_apt_rents.load_config(args.config)
+        rent_payload = fetch_apt_rents.collect(
+            rent_cfg, months=args.months, sido=args.sido,
+            refresh_months=args.refresh_months)
+        rm = rent_payload["meta"]
+        rent_path = os.path.join(args.out_dir, "rents.json")
+        with open(rent_path, "w", encoding="utf-8") as f:
+            json.dump(rent_payload, f, ensure_ascii=False, separators=(",", ":"))
+        print(f"  -> {rent_path}: 전월세 {rm['record_count']:,}건 "
+              f"(전세 {rm['jeonse_count']:,}건), API {rm['api_calls']}회")
+
     print("[2/3] 집계")
-    analytics = analyze(full, expected_regions=regions(args.sido))
+    analytics = analyze(full, expected_regions=regions(args.sido), rent_payload=rent_payload)
 
     # D-1: 행정구역 개편으로 코드가 폐지되면 API 는 오류 없이 totalCount=0 을 돌려준다.
     # 실패로 잡히지 않아 지역이 통째로 조용히 빠지므로(2026-08-06 에 6개 지역이 이렇게

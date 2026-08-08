@@ -192,6 +192,12 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <div class="dist" id="dist"></div>
 </section>
 
+<section class="card" id="jeonse-card" style="display:none">
+  <h2>전세가율 (전세보증금 / 매매가)</h2>
+  <p class="sub" id="jeonse-note" style="margin:0 0 12px"></p>
+  <div class="dist" id="jeonse"></div>
+</section>
+
 <section class="card">
   <h2>거래 형태</h2>
   <div class="dist" id="dealtype"></div>
@@ -514,6 +520,25 @@ function renderRecordHighs(){
         해당 기간에 갱신 거래가 없다</td></tr>`;
 }
 
+/* ---------- 전세가율 ---------- */
+function renderJeonse(){
+  const j = D.jeonse;
+  if (!j || !j.regions || !j.regions.length) return;
+  $('#jeonse-card').style.display = '';
+  $('#jeonse-note').innerHTML =
+    `수도권 중위 <b style="color:var(--text)">${j.overall_pct}%</b> · `
+    + `같은 단지 × 같은 전용타입끼리 짝지어 계산 (${nf(j.matched_pairs)}쌍 매칭) · `
+    + `양쪽 모두 ${j.min_pairs}건 이상, 시군구당 ${j.min_region_samples}개 단지 이상만 집계`;
+  const rows = [...j.regions].sort((a,b) => b.jeonse_ratio_pct - a.jeonse_ratio_pct);
+  const max = Math.max(...rows.map(r => r.jeonse_ratio_pct), 1);
+  $('#jeonse').innerHTML = rows.map(r => `<div class="dist-row">
+      <div style="font-size:12.5px">${esc(r.region.replace('특별시','').replace('광역시','').replace('경기도 ',''))}</div>
+      <div class="track"><div class="fill" style="width:${(r.jeonse_ratio_pct/max*100).toFixed(1)}%"></div></div>
+      <div class="dist-val"><b style="color:var(--text)">${r.jeonse_ratio_pct}%</b>
+        · 단지 ${nf(r.matched_complexes)}개</div>
+    </div>`).join('');
+}
+
 /* ---------- 거래 형태 ---------- */
 function renderDealType(){
   const dt = D.deal_type;
@@ -582,6 +607,7 @@ initTheme();
 renderMeta();
 renderDist();
 renderRecordHighs();
+renderJeonse();
 renderDealType();
 renderAll();
 $('#csv').onclick = downloadCsv;

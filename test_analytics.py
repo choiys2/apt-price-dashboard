@@ -6,7 +6,7 @@ from apt_analytics import (
     PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym,
     _same_month_last_year, analyze, area_distribution, build_kpi, cancel_rate_series,
     deal_type_stats, missing_regions, monthly_series, record_highs, reference_month,
-    region_ranking, summarize, umd_ranking,
+    jeonse_ratio, region_ranking, summarize, umd_ranking,
 )
 
 
@@ -307,6 +307,63 @@ class BrokerViewTest(unittest.TestCase):
         self.assertEqual(out["broker"]["kpi"]["total_deals"], 5)
         # 직거래를 빼면 중위 거래가가 올라간다
         self.assertGreater(out["broker"]["kpi"]["median_amount"], out["kpi"]["median_amount"])
+
+
+def rent(ym, deposit, apt="가나아파트", area=84.9, monthly=0, code="11680"):
+    return {"lawd_cd": code, "apt": apt, "area_m2": area, "area_type": int(area),
+            "deposit_manwon": deposit, "monthly_manwon": monthly,
+            "is_jeonse": monthly == 0, "deal_ym": ym, "deal_date": f"{ym}-15"}
+
+
+class JeonseRatioTest(unittest.TestCase):
+    """전세가율은 같은 단지 x 같은 타입끼리 짝지어야 한다."""
+
+    def test_matched_pair_ratio(self):
+        sales = [deal("2026-05", 100000), deal("2026-06", 100000)]
+        rents = [rent("2026-05", 60000), rent("2026-06", 60000)]
+        out = jeonse_ratio(sales, rents, min_pairs=2, min_region_samples=1)
+        self.assertEqual(out["matched_pairs"], 1)
+        self.assertEqual(out["overall_pct"], 60.0)
+        self.assertEqual(out["regions"][0]["jeonse_ratio_pct"], 60.0)
+
+    def test_monthly_rent_excluded(self):
+        # 월세 계약의 보증금을 전세금으로 쓰면 전세가율이 터무니없이 낮아진다
+        sales = [deal("2026-05", 100000), deal("2026-06", 100000)]
+        rents = [rent("2026-05", 5000, monthly=100), rent("2026-06", 5000, monthly=100)]
+        out = jeonse_ratio(sales, rents, min_pairs=2, min_region_samples=1)
+        self.assertEqual(out["matched_pairs"], 0)
+        self.assertIsNone(out["overall_pct"])
+
+    def test_area_types_are_not_crossed(self):
+        # 84㎡ 매매와 59㎡ 전세를 짝지으면 전세가율이 실제보다 낮게 나온다
+        sales = [deal("2026-05", 100000, area=84.9), deal("2026-06", 100000, area=84.9)]
+        rents = [rent("2026-05", 60000, area=59.9), rent("2026-06", 60000, area=59.9)]
+        out = jeonse_ratio(sales, rents, min_pairs=2, min_region_samples=1)
+        self.assertEqual(out["matched_pairs"], 0)
+
+    def test_thin_samples_dropped(self):
+        sales = [deal("2026-05", 100000)]              # 매매 1건뿐
+        rents = [rent("2026-05", 60000), rent("2026-06", 60000)]
+        out = jeonse_ratio(sales, rents, min_pairs=2, min_region_samples=1)
+        self.assertEqual(out["matched_pairs"], 0)
+
+    def test_region_needs_enough_complexes(self):
+        sales = [deal("2026-05", 100000), deal("2026-06", 100000)]
+        rents = [rent("2026-05", 60000), rent("2026-06", 60000)]
+        out = jeonse_ratio(sales, rents, min_pairs=2, min_region_samples=5)
+        self.assertEqual(out["matched_pairs"], 1)      # 짝은 지어졌지만
+        self.assertEqual(out["regions"], [])           # 지역 대표값으로는 못 올린다
+
+    def test_analyze_attaches_jeonse_when_rent_given(self):
+        payload = {"meta": {}, "records": [deal("2026-05", 100000), deal("2026-06", 100000)]}
+        rp = {"records": [rent("2026-05", 60000), rent("2026-06", 60000)]}
+        out = analyze(payload, rent_payload=rp)
+        self.assertIn("jeonse", out)
+        self.assertEqual(out["meta"]["jeonse_record_count"], 2)
+
+    def test_analyze_without_rent_has_no_jeonse(self):
+        payload = {"meta": {}, "records": [deal("2026-05", 100000)]}
+        self.assertNotIn("jeonse", analyze(payload))
 
 
 if __name__ == "__main__":

@@ -17,12 +17,13 @@ fetch_apt_trades.py 가 만든 정규화 레코드를 받아 대시보드가 바
   python apt_analytics.py live/trades.json live/analytics.json
 """
 import json
+import os
 import sys
 from collections import defaultdict
 from datetime import date
 from statistics import median
 
-from lawd_codes import REGIONS, SIDO_ORDER
+from lawd_codes import REGIONS, SIDO_ORDER, region_name
 
 # 신고 지연으로 확정되지 않은 것으로 간주할 최근 개월 수
 PROVISIONAL_MONTHS = 2
@@ -300,6 +301,57 @@ def build_kpi(records, months):
     }
 
 
+def jeonse_ratio(sale_records, rent_records, min_pairs=2, min_region_samples=5):
+    """전세가율 = 전세보증금 / 매매가.
+
+    지역 단위로 중위 전세금 / 중위 매매가를 나누면 안 된다. 두 모집단의 단지·평형
+    구성이 달라서(전세는 신축 대단지에, 매매는 재건축 노후단지에 몰리는 식) 비율이
+    실제와 크게 어긋난다. 그래서 **같은 단지 x 같은 면적타입**끼리 먼저 짝을 짓고,
+    그 비율들의 중위값을 지역값으로 올린다.
+
+    한쪽이라도 표본이 min_pairs 미만인 조합은 버린다. 단지-타입 표본이 1건이면
+    비율이 그 한 건에 통째로 좌우된다.
+    """
+    sale = defaultdict(list)
+    for r in sale_records:
+        atype = _area_type(r)
+        if atype and r.get("apt") and r.get("amount_manwon"):
+            sale[(r["lawd_cd"], r["apt"], atype)].append(r["amount_manwon"])
+
+    rent = defaultdict(list)
+    for r in rent_records:
+        if r.get("is_jeonse") and r.get("area_type") and r.get("apt") and r.get("deposit_manwon"):
+            rent[(r["lawd_cd"], r["apt"], r["area_type"])].append(r["deposit_manwon"])
+
+    per_region = defaultdict(list)
+    pairs = 0
+    for key, sale_amounts in sale.items():
+        deposits = rent.get(key)
+        if not deposits or len(sale_amounts) < min_pairs or len(deposits) < min_pairs:
+            continue
+        ratio = median(deposits) / median(sale_amounts) * 100
+        per_region[key[0]].append(ratio)
+        pairs += 1
+
+    rows = []
+    for code, ratios in per_region.items():
+        if len(ratios) < min_region_samples:
+            continue
+        rows.append({"lawd_cd": code, "region": region_name(code),
+                     "jeonse_ratio_pct": round(median(ratios), 1),
+                     "matched_complexes": len(ratios)})
+    rows.sort(key=lambda r: r["jeonse_ratio_pct"], reverse=True)
+
+    overall = median([r for rs in per_region.values() for r in rs]) if per_region else None
+    return {
+        "regions": rows,
+        "overall_pct": round(overall, 1) if overall is not None else None,
+        "matched_pairs": pairs,
+        "min_pairs": min_pairs,
+        "min_region_samples": min_region_samples,
+    }
+
+
 def _views(records, months):
     """한 벌의 거래 목록으로 KPI/추이/랭킹을 만든다. 전체본과 중개거래본에 같이 쓴다."""
     return {
@@ -310,7 +362,7 @@ def _views(records, months):
     }
 
 
-def analyze(payload, include_canceled=False, expected_regions=None):
+def analyze(payload, include_canceled=False, expected_regions=None, rent_payload=None):
     raw = payload["records"]
     records = raw if include_canceled else [r for r in raw if not r.get("canceled")]
     if not records:
@@ -339,6 +391,11 @@ def analyze(payload, include_canceled=False, expected_regions=None):
         "record_highs": record_highs(records, months),
         "cancel_rate": cancel_rate_series(raw, months),
     }
+    if rent_payload:
+        rr = rent_payload.get("records", [])
+        result["jeonse"] = jeonse_ratio(records, rr)
+        result["meta"]["rent_record_count"] = len(rr)
+        result["meta"]["jeonse_record_count"] = sum(1 for r in rr if r.get("is_jeonse"))
     return result
 
 
@@ -352,7 +409,13 @@ def main():
     with open(src, encoding="utf-8") as f:
         payload = json.load(f)
 
-    result = analyze(payload)
+    rent_payload = None
+    rent_path = sys.argv[3] if len(sys.argv) > 3 else None
+    if rent_path and os.path.exists(rent_path):
+        with open(rent_path, encoding="utf-8") as f:
+            rent_payload = json.load(f)
+
+    result = analyze(payload, rent_payload=rent_payload)
     with open(dst, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
 
@@ -371,6 +434,10 @@ def main():
           f"중개거래 대비 평당가 {dt['direct_vs_broker_pct']}%")
     rh = result["record_highs"]
     print(f"  최근 {len(rh['window'])}개월 신고가 {rh['high_count']:,}건 / 신저가 {rh['low_count']:,}건")
+    if result.get("jeonse"):
+        j = result["jeonse"]
+        print(f"  전세가율 중위 {j['overall_pct']}% "
+              f"(단지x타입 {j['matched_pairs']:,}쌍 매칭, 시군구 {len(j['regions'])}개)")
     missing = result["meta"]["missing_regions"]
     if missing:
         print(f"  ! 거래 0건 시군구 {len(missing)}개: "
