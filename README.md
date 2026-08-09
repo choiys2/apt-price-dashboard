@@ -62,6 +62,29 @@ python run_apt_pipeline.py --sido 서울특별시            # 서울만
 - **용량**: 수도권 15개월이면 원본 31만 건 안팎. 비압축 JSON은 100MB를 넘어 gzip으로
   저장한다(약 1/8). 같은 내용이면 바이트도 같도록 `mtime=0` 으로 고정해 불필요한 diff 를 막는다.
 
+## API 규격 (공식 기술문서로 검증, 2026-08-09)
+
+data.go.kr 이 배포하는 기술문서(.hwp)에서 확인한 값이다. 추측이 아니다.
+
+| | 매매 | 전월세 |
+| --- | --- | --- |
+| 엔드포인트 | `https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade` | `.../RTMSDataSvcAptRent` |
+| 오퍼레이션 | `getRTMSDataSvcAptTrade` | `getRTMSDataSvcAptRent` |
+| 요청 | `serviceKey`, `LAWD_CD`, `DEAL_YMD`, `pageNo`, `numOfRows` | 동일 |
+
+전월세 응답 항목 (문서 명세):
+
+| 필드 | 국문 | 비고 |
+| --- | --- | --- |
+| `deposit` | 보증금액(만원) | 샘플 `29,768` — 콤마 포함이라 파싱 시 제거 필요 |
+| `monthlyRent` | 월세금액(만원) | **0이면 전세**. 전세가율은 이 건만 쓴다 |
+| `excluUseAr` | 전용면적 | |
+| `dealYear` / `dealMonth` / `dealDay` | 계약년/월/일 | |
+| `sggCd` `umdNm` `aptNm` `jibun` `floor` `buildYear` | | 매매와 동일 |
+| `contractTerm` `contractType` | 계약기간 / 계약구분 | 신규·갱신 구분 |
+| `useRRRight` | 갱신요구권 사용 | **미사용** — 갱신 계약 분석에 쓸 수 있다 |
+| `preDeposit` `preMonthlyRent` | 종전계약 보증금 / 월세 | **미사용** — 갱신 시 전세금 상승률 산출 가능 |
+
 ## 집계 규칙
 
 - **해제(취소) 거래는 제외한다.** 성사되지 않은 계약이라 가격 통계를 왜곡한다. 원본에는
