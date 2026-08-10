@@ -1,0 +1,75 @@
+name: 수집 시도 (재사용)
+
+# deploy.yml 이 최대 3번까지 호출한다. 매 호출이 새 러너 = 새 공인 IP 를 받는데,
+# data.go.kr 이 러너에 따라 간헐적으로 TCP 연결을 끊기 때문에 이게 재시도의 핵심이다
+# (같은 커밋에서 어떤 러너는 타임아웃, 어떤 러너는 0.4초에 응답하는 것이 실측됐다).
+#
+# 병렬이 아니라 순차인 이유: 병렬로 3개를 띄우면 성공한 러너의 호출까지 3배가 되어
+# 일일 트래픽 한도(1만건)를 낭비한다. 앞 시도가 성공하면 뒤 시도는 아예 실행되지 않는다.
+on:
+  workflow_call:
+    outputs:
+      healthy:
+        description: "수집·집계가 배포 가능한 수준으로 끝났는지"
+        value: ${{ jobs.collect.outputs.healthy }}
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    outputs:
+      healthy: ${{ steps.pipeline.outputs.healthy }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 표준 라이브러리만 쓰므로 pip 설치가 없다.
+      - name: 단위 테스트
+        run: |
+          python test_parse.py
+          python test_analytics.py
+
+      # 수집량이 임계치 미만이면 run_apt_pipeline.py 가 exit 2,
+      # 거래 0건 시군구가 허용치를 넘으면 exit 3 으로 끝난다.
+      - name: 수집 + 집계 + 대시보드 생성
+        id: pipeline
+        env:
+          MOLIT_SERVICE_KEY: ${{ secrets.MOLIT_SERVICE_KEY }}
+        run: |
+          if python run_apt_pipeline.py --months 15 --with-rent; then
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::수집이 임계치에 못 미쳤다. 다음 러너로 재시도한다."
+          fi
+
+      # 과거 월의 원본은 확정값이라 한 번 받아두면 다시 안 받는다.
+      # 실패해도 항상 커밋한다. 받다 만 캐시를 버리면 다음 시도가 처음부터 다시
+      # 받아야 하는데, 원본 캐시는 부분적이어도 그 자체로 유효하다. 시도를 거듭할수록
+      # 캐시가 채워지므로, 러너가 계속 막혀도 결국 수렴한다.
+      - name: 원본 캐시 커밋 (data/)
+        if: always()
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 디렉터리가 없으면 git add 가 exit 128 로 죽어 스텝 전체가 실패한다.
+          mkdir -p data/raw data/rent
+          git add -A data
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: 실거래 원본 캐시 갱신 $(date -u +%F)"
+          # 앞선 시도가 이미 푸시했을 수 있어 rebase 후 재시도한다.
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase origin main || true
+          done
+
+      - name: 대시보드 아티팩트 업로드
+        if: steps.pipeline.outputs.healthy == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: live/index.html
+          retention-days: 1

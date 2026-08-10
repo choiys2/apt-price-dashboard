@@ -21,7 +21,7 @@ import os
 import sys
 from collections import defaultdict
 from datetime import date
-from statistics import median
+from statistics import median, quantiles
 
 from lawd_codes import REGIONS, SIDO_ORDER, region_name
 
@@ -64,17 +64,36 @@ def _same_month_last_year(ym):
 
 
 def summarize(records):
-    """거래 목록 -> {건수, 중위/평균 평당가, 중위 거래금액, 평균 전용면적}."""
+    """거래 목록 -> 건수·중위/평균 평당가·사분위·중위 거래금액·평균 전용면적.
+
+    사분위(p25/p75)를 함께 내는 이유: 중위값 하나로는 지역을 설명할 수 없다.
+    실측으로 강남구는 25% 7,514 / 중위 10,909 / 75% 14,217 이라 사분위폭이 중위의
+    61%다. "강남구 = 10,909만원/평"은 7,500짜리와 14,200짜리를 한 숫자로 뭉갠 값이다.
+    밴드를 함께 보면 중위가 오른 것인지 고가 구간만 오른 것인지 갈린다.
+    """
     if not records:
         return {"count": 0, "median_ppp": None, "avg_ppp": None,
+                "p25_ppp": None, "p75_ppp": None, "iqr_ratio_pct": None,
                 "median_amount": None, "avg_area": None}
     ppp = [r["price_per_pyeong"] for r in records if r.get("price_per_pyeong")]
     areas = [r["area_m2"] for r in records if r.get("area_m2")]
     amounts = [r["amount_manwon"] for r in records if r.get("amount_manwon") is not None]
+
+    med = round(median(ppp)) if ppp else None
+    p25 = p75 = iqr_ratio = None
+    # 사분위는 표본이 최소 4건은 돼야 의미가 있다(statistics.quantiles 요구사항이기도 하다).
+    if len(ppp) >= 4:
+        q1, _, q3 = quantiles(ppp, n=4)
+        p25, p75 = round(q1), round(q3)
+        if med:
+            iqr_ratio = round((p75 - p25) / med * 100, 1)
     return {
         "count": len(records),
-        "median_ppp": round(median(ppp)) if ppp else None,
+        "median_ppp": med,
         "avg_ppp": round(sum(ppp) / len(ppp)) if ppp else None,
+        "p25_ppp": p25,
+        "p75_ppp": p75,
+        "iqr_ratio_pct": iqr_ratio,
         "median_amount": round(median(amounts)) if amounts else None,
         "avg_area": round(sum(areas) / len(areas), 1) if areas else None,
     }
@@ -133,6 +152,9 @@ def region_ranking(records, months):
             "count": overall["count"],
             "share_pct": round(overall["count"] / total * 100, 2) if total else 0,
             "median_ppp": overall["median_ppp"],
+            "p25_ppp": overall["p25_ppp"],
+            "p75_ppp": overall["p75_ppp"],
+            "iqr_ratio_pct": overall["iqr_ratio_pct"],
             "median_amount": overall["median_amount"],
             "avg_area": overall["avg_area"],
             "ref_count": cur_s["count"],
@@ -221,6 +243,79 @@ def record_highs(records, months, recent_months=3, min_history=3, top_n=60):
     lows.sort(key=lambda x: x["gap_pct"])
     return {"window": months[-recent_months:], "highs": highs[:top_n], "lows": lows[:top_n],
             "high_count": len(highs), "low_count": len(lows)}
+
+
+def complex_histories(records, keys, max_points=40):
+    """지정한 (시군구, 단지, 면적타입) 조합의 거래 이력.
+
+    신고가 표는 "+43.3% 갱신" 같은 이벤트만 던져서, 그게 얼마나 이례적인지 판단할
+    맥락이 없다. 해당 조합의 거래 궤적을 함께 실어 대시보드에서 펼쳐 볼 수 있게 한다.
+    keys 를 받는 이유는 전체 28,488개 조합을 다 실으면 JSON 이 감당이 안 되기 때문이다.
+    """
+    wanted = set(keys)
+    grouped = defaultdict(list)
+    for r in records:
+        atype = _area_type(r)
+        if not atype or not r.get("apt"):
+            continue
+        key = (r["lawd_cd"], r["apt"], atype)
+        if key in wanted:
+            grouped[key].append(r)
+
+    out = {}
+    for key, rows in grouped.items():
+        rows.sort(key=lambda r: r["deal_date"])
+        # 오래된 것부터 잘라내 최근 궤적을 남긴다.
+        rows = rows[-max_points:]
+        out["|".join((key[0], key[1], str(key[2])))] = [
+            {"d": r["deal_date"], "amt": r["amount_manwon"],
+             "ppp": r["price_per_pyeong"], "fl": r["floor"]}
+            for r in rows
+        ]
+    return out
+
+
+def floor_premium(records, min_group=6, min_regions=1):
+    """층 프리미엄. 반드시 단지 x 면적타입 **안에서** 비교한다.
+
+    전체 평균으로 저층/고층을 비교하면 +12.6% 가 나오는데, 고층 단지가 대체로 신축이라
+    건축연차 효과가 섞인 값이다. 같은 단지 같은 타입 안에서 각 거래가 그 조합의 중위값
+    대비 몇 % 인지를 구하고, 그 편차를 층 구간별로 모아야 순수 층 효과가 남는다.
+    """
+    groups = defaultdict(list)
+    for r in records:
+        atype = _area_type(r)
+        if atype and r.get("apt") and r.get("floor") is not None and r.get("price_per_pyeong"):
+            groups[(r["lawd_cd"], r["apt"], atype)].append(r)
+
+    buckets = [("1~3층", 1, 3), ("4~9층", 4, 9), ("10~14층", 10, 14),
+               ("15~19층", 15, 19), ("20층~", 20, 10**6)]
+    devs = {label: [] for label, _, _ in buckets}
+    used_groups = 0
+    for rows in groups.values():
+        if len(rows) < min_group:
+            continue
+        base = median([r["price_per_pyeong"] for r in rows])
+        if not base:
+            continue
+        used_groups += 1
+        for r in rows:
+            fl = r["floor"]
+            for label, lo, hi in buckets:
+                if lo <= fl <= hi:
+                    devs[label].append((r["price_per_pyeong"] / base - 1) * 100)
+                    break
+
+    rows_out = []
+    for label, _, _ in buckets:
+        v = devs[label]
+        rows_out.append({
+            "bucket": label,
+            "count": len(v),
+            # 같은 단지·타입의 중위값 대비 편차(%). 0이면 그 단지 평균과 같다는 뜻.
+            "premium_pct": round(median(v), 1) if v else None,
+        })
+    return {"buckets": rows_out, "groups_used": used_groups, "min_group": min_group}
 
 
 def deal_type_stats(records):
@@ -388,9 +483,21 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
         "umd_top": umd_ranking(records),
         "area_distribution": area_distribution(records),
         "deal_type": deal_type_stats(records),
-        "record_highs": record_highs(records, months),
+        "record_highs": None,   # 아래에서 채운다
         "cancel_rate": cancel_rate_series(raw, months),
     }
+    rh = record_highs(records, months)
+    result["record_highs"] = rh
+    # 표에 실제로 뜨는 행의 조합만 이력을 싣는다. 전체 28,488개를 다 넣으면 JSON 이
+    # 감당이 안 되고, 화면에서 펼쳐 보는 것도 이 행들뿐이다.
+    keys = {(r["region"], r["apt"], r["area_type"]) for r in rh["highs"] + rh["lows"]}
+    code_by_region = {}
+    for r in records:
+        code_by_region.setdefault(r["region"], r["lawd_cd"])
+    keys = {(code_by_region.get(reg), apt, at) for reg, apt, at in keys if code_by_region.get(reg)}
+    result["complex_history"] = complex_histories(records, keys)
+    result["floor_premium"] = floor_premium(records)
+
     if rent_payload:
         rr = rent_payload.get("records", [])
         result["jeonse"] = jeonse_ratio(records, rr)

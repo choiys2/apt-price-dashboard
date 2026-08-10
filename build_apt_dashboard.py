@@ -79,6 +79,7 @@ svg{display:block;width:100%;height:auto;overflow:visible}
 .bar{fill:var(--accent);opacity:.42}
 .bar.prov{opacity:.18}
 .bar:hover{opacity:.75}
+.band{fill:var(--up);opacity:.12;stroke:none}
 .pline{fill:none;stroke:var(--up);stroke-width:2.2;stroke-linejoin:round}
 .pline.prov{stroke-dasharray:5 4}
 .pdot{fill:var(--up)}
@@ -103,6 +104,12 @@ th{color:var(--muted);font-weight:600;font-size:12.5px;cursor:pointer;
 th:hover{color:var(--text)}
 th[aria-sort]{color:var(--accent)}
 tbody tr:hover{background:var(--panel-2)}
+.rh-row{cursor:pointer}
+.rh-detail td{background:var(--panel-2);white-space:normal}
+.hist{display:flex;flex-wrap:wrap;gap:6px}
+.hist-item{background:var(--panel);border:1px solid var(--line);border-radius:6px;
+  padding:4px 9px;font-size:12.5px}
+.hist-item.cur{border-color:var(--up);color:var(--text)}
 td.name{font-weight:560}
 .muted{color:var(--muted)}
 /* --- 면적 분포 --- */
@@ -149,6 +156,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
     <div class="legend">
       <span><i style="background:var(--accent);opacity:.45"></i>거래건수</span>
       <span><i style="background:var(--up)"></i>중위 평당가(만원)</span>
+      <span><i style="background:var(--up);opacity:.25"></i>25~75% 구간</span>
       <span class="muted">옅은 구간 = 신고 지연 잠정치</span>
     </div>
   </div>
@@ -190,6 +198,12 @@ footer ul{padding-left:18px;margin:8px 0 0}
 <section class="card">
   <h2>전용면적 구간별 거래 비중 · 중위 평당가</h2>
   <div class="dist" id="dist"></div>
+</section>
+
+<section class="card" id="floor-card" style="display:none">
+  <h2>층별 프리미엄</h2>
+  <p class="sub" id="floor-note" style="margin:0 0 12px"></p>
+  <div class="dist" id="floorprem"></div>
 </section>
 
 <section class="card" id="jeonse-card" style="display:none">
@@ -358,7 +372,7 @@ function renderChart(){
   if (!ms.length){ $('#chart').innerHTML = '<p class="sub">데이터 없음</p>'; return; }
 
   const maxCount = Math.max(...ms.map(m => m.count), 1);
-  const ppps = ms.map(m => m.median_ppp).filter(v => v != null);
+  const ppps = ms.flatMap(m => [m.median_ppp, m.p25_ppp, m.p75_ppp]).filter(v => v != null);
   const pMax = ppps.length ? Math.max(...ppps) : 1;
   const pMin = ppps.length ? Math.min(...ppps) : 0;
   // 가격 축은 0부터 그리면 변동이 안 보인다. 최소~최대에 10% 여백만 준다.
@@ -385,6 +399,17 @@ function renderChart(){
          + ` width="${bw*0.64}" height="${Math.max(h,0)}" rx="3"><title>${m.ym} 거래 ${nf(m.count)}건`
          + `${m.provisional?' (잠정)':''}</title></rect>`;
   });
+  // 사분위 밴드(25~75%). 중위선만 그리면 "강남구 10,909만원/평" 같은 한 줄이
+  // 7,500짜리와 14,200짜리를 뭉갠 값이라는 사실이 화면에서 사라진다.
+  const band = ms.filter(m => m.p25_ppp != null && m.p75_ppp != null);
+  if (band.length > 1){
+    const top = ms.map((m,i) => m.p75_ppp == null ? null : [x(i), yP(m.p75_ppp)]).filter(Boolean);
+    const bot = ms.map((m,i) => m.p25_ppp == null ? null : [x(i), yP(m.p25_ppp)]).filter(Boolean);
+    const d = top.map((p,i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ')
+      + ' ' + bot.reverse().map(p => 'L' + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ') + ' Z';
+    svg += `<path class="band" d="${d}"><title>25~75% 구간</title></path>`;
+  }
+
   // 선(중위 평당가) — 확정 구간과 잠정 구간을 나눠 그린다
   const pts = ms.map((m,i) => m.median_ppp == null ? null : [x(i), yP(m.median_ppp)]);
   const firstProv = ms.findIndex(m => m.provisional);
@@ -415,6 +440,8 @@ const COLS = [
   {k:'rank',          t:'#',          f:r => r.rank},
   {k:'region',        t:'지역',        f:r => `<span class="name">${esc(r.region)}</span>`},
   {k:'median_ppp',    t:'중위 평당가',   f:r => nf(r.median_ppp)},
+  {k:'iqr_ratio_pct',  t:'25~75% 구간',  f:r => r.p25_ppp == null ? '<span class="muted">–</span>'
+      : `<span class="muted">${nf(r.p25_ppp)}~${nf(r.p75_ppp)}</span>`},
   {k:'median_amount', t:'중위 거래가',   f:r => fmtAmount(r.median_amount)},
   {k:'count',         t:'거래건수',     f:r => nf(r.count)},
   {k:'share_pct',     t:'비중',        f:r => r.share_pct.toFixed(1) + '%'},
@@ -460,9 +487,9 @@ function renderTable(){
 function downloadCsv(){
   const rows = sorted(regionsFor(sido));
   const head = ['순위','지역','중위평당가(만원)','중위거래가(만원)','거래건수','비중(%)',
-                '평균전용(㎡)','기준월건수','전월비건수(%)','전월비평당가(%)'];
+                '25%(만원)','75%(만원)','평균전용(㎡)','기준월건수','전월비건수(%)','전월비평당가(%)'];
   const body = rows.map(r => [r.rank, r.region, r.median_ppp, r.median_amount, r.count,
-    r.share_pct, r.avg_area, r.ref_count, r.mom_count_pct, r.mom_ppp_pct]
+    r.share_pct, r.p25_ppp, r.p75_ppp, r.avg_area, r.ref_count, r.mom_count_pct, r.mom_ppp_pct]
     .map(v => v == null ? '' : `"${String(v).replace(/"/g,'""')}"`).join(','));
   // 엑셀이 UTF-8을 인식하도록 BOM을 붙인다
   const blob = new Blob(['﻿' + [head.join(','), ...body].join('\r\n')],
@@ -506,7 +533,8 @@ function renderRecordHighs(){
   $('#rhnote').textContent =
     `${rh.window[0]} ~ ${rh.window[rh.window.length-1]} 계약분 · 단지×전용면적 타입별로 `
     + `직전 거래 4건 이상인 경우만 · 갱신폭 순 상위 ${rows.length}건`;
-  $('#rhbody').innerHTML = rows.map(r => `<tr>
+  const hist = D.complex_history || {};
+  $('#rhbody').innerHTML = rows.map((r, i) => `<tr class="rh-row" data-i="${i}">
       <td>${esc(r.deal_date.slice(2))}</td>
       <td>${esc(r.region)}${r.umd ? ' ' + esc(r.umd) : ''}</td>
       <td class="name">${esc(r.apt)}</td>
@@ -515,9 +543,58 @@ function renderRecordHighs(){
       <td>${fmtAmount(r.amount_manwon)}</td>
       <td class="muted">${fmtAmount(r.prev)}</td>
       <td>${pct(r.gap_pct)}</td>
-    </tr>`).join('')
+    </tr>
+    <tr class="rh-detail" data-d="${i}" hidden><td colspan="8"></td></tr>`).join('')
     || `<tr><td colspan="8" class="muted" style="text-align:center;padding:24px">
         해당 기간에 갱신 거래가 없다</td></tr>`;
+
+  // 행을 누르면 그 단지·타입의 거래 궤적을 펼친다. 갱신폭만 봐서는 그게 얼마나
+  // 이례적인지 알 수 없어서, 맥락을 같은 자리에 붙인다.
+  $('#rhbody').querySelectorAll('.rh-row').forEach(tr => tr.onclick = () => {
+    const i = +tr.dataset.i, r = rows[i];
+    const detail = $(`#rhbody .rh-detail[data-d="${i}"]`);
+    if (!detail.hidden){ detail.hidden = true; return; }
+    const key = `${lawdOf(r.region)}|${r.apt}|${r.area_type}`;
+    const h = hist[key];
+    detail.querySelector('td').innerHTML = !h ? '<span class="muted">이력 없음</span>'
+      : `<div class="hist">${h.map(x => `<span class="hist-item${x.amt===r.amount_manwon?' cur':''}">`
+          + `${x.d.slice(2)} <b>${fmtAmount(x.amt)}</b> <span class="muted">${x.fl ?? '–'}층</span></span>`).join('')}
+         </div>`;
+    detail.hidden = false;
+  });
+}
+
+// analytics 는 지역명만 실어서 코드가 필요할 때 역인덱스를 쓴다.
+const REGION_CODE = Object.fromEntries((D.regions || []).map(r => [r.region, r.lawd_cd]));
+function lawdOf(region){ return REGION_CODE[region] || ''; }
+
+/* ---------- 층별 프리미엄 ---------- */
+function renderFloorPremium(){
+  const fp = D.floor_premium;
+  if (!fp || !fp.buckets.some(b => b.premium_pct != null)) return;
+  $('#floor-card').style.display = '';
+  $('#floor-note').innerHTML =
+    `같은 단지 × 같은 전용타입 안에서, 그 조합의 중위 평당가 대비 편차다 `
+    + `(거래 ${fp.min_group}건 이상인 ${nf(fp.groups_used)}개 조합). `
+    + `전체 평균으로 저층·고층을 비교하면 고층 단지가 대체로 신축이라는 효과가 섞여 `
+    + `실제보다 크게 나온다.`;
+  const vals = fp.buckets.map(b => Math.abs(b.premium_pct || 0));
+  const max = Math.max(...vals, 1);
+  $('#floorprem').innerHTML = fp.buckets.map(b => {
+    const v = b.premium_pct;
+    const w = v == null ? 0 : Math.abs(v) / max * 50;   // 0을 중앙에 두고 좌우로
+    const left = v == null ? 50 : (v < 0 ? 50 - w : 50);
+    return `<div class="dist-row">
+      <div>${b.bucket}</div>
+      <div class="track" style="position:relative">
+        <div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--line)"></div>
+        <div class="fill" style="position:absolute;left:${left}%;width:${w}%;
+          background:${v < 0 ? 'var(--down)' : 'var(--up)'}"></div>
+      </div>
+      <div class="dist-val"><b style="color:var(--text)">${v == null ? '–' : (v > 0 ? '+' : '') + v + '%'}</b>
+        · 거래 ${nf(b.count)}건</div>
+    </div>`;
+  }).join('');
 }
 
 /* ---------- 전세가율 ---------- */
@@ -607,6 +684,7 @@ initTheme();
 renderMeta();
 renderDist();
 renderRecordHighs();
+renderFloorPremium();
 renderJeonse();
 renderDealType();
 renderAll();

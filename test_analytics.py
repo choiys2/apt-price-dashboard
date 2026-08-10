@@ -6,7 +6,8 @@ from apt_analytics import (
     PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym,
     _same_month_last_year, analyze, area_distribution, build_kpi, cancel_rate_series,
     deal_type_stats, missing_regions, monthly_series, record_highs, reference_month,
-    jeonse_ratio, region_ranking, summarize, umd_ranking,
+    complex_histories, floor_premium, jeonse_ratio, region_ranking, summarize,
+    umd_ranking,
 )
 
 
@@ -364,6 +365,74 @@ class JeonseRatioTest(unittest.TestCase):
     def test_analyze_without_rent_has_no_jeonse(self):
         payload = {"meta": {}, "records": [deal("2026-05", 100000)]}
         self.assertNotIn("jeonse", analyze(payload))
+
+
+class QuartileTest(unittest.TestCase):
+    def test_quartiles_and_spread(self):
+        rows = [rec("2026-06", p) for p in (1000, 2000, 3000, 4000, 5000)]
+        s = summarize(rows)
+        self.assertEqual(s["median_ppp"], 3000)
+        self.assertEqual((s["p25_ppp"], s["p75_ppp"]), (1500, 4500))
+        self.assertEqual(s["iqr_ratio_pct"], 100.0)     # (4500-1500)/3000
+
+    def test_too_few_samples_have_no_quartiles(self):
+        s = summarize([rec("2026-06", 1000), rec("2026-06", 2000)])
+        self.assertIsNone(s["p25_ppp"])
+        self.assertIsNone(s["iqr_ratio_pct"])
+        self.assertEqual(s["median_ppp"], 1500)          # 중위값은 그대로 낸다
+
+
+def fdeal(ym, amount, floor, apt="가나아파트", area=84.9, code="11680"):
+    d = deal(ym, amount, apt=apt, area=area, code=code)
+    d["floor"] = floor
+    return d
+
+
+class FloorPremiumTest(unittest.TestCase):
+    """층 효과는 단지 x 타입 안에서 재야 한다. 전체 평균으로 재면 건축연차가 섞인다."""
+
+    def test_deviation_measured_within_group(self):
+        # 한 단지 안에서 저층만 싸다
+        rows = ([fdeal("2026-06", 90000, f) for f in (1, 2, 3)]
+                + [fdeal("2026-06", 100000, f) for f in (5, 6, 12)])
+        out = floor_premium(rows, min_group=6)
+        by = {b["bucket"]: b["premium_pct"] for b in out["buckets"]}
+        self.assertEqual(out["groups_used"], 1)
+        self.assertLess(by["1~3층"], 0)                  # 단지 중위 대비 저평가
+        self.assertGreater(by["4~9층"], 0)
+
+    def test_cheap_old_complex_does_not_create_fake_premium(self):
+        # 저층만 있는 싼 단지 + 고층만 있는 비싼 단지. 전체로 보면 "고층이 비싸다"가
+        # 되지만, 단지 안에서는 편차가 0이라 프리미엄이 잡히면 안 된다.
+        rows = ([fdeal("2026-06", 50000, f, apt="싼단지") for f in (1, 2, 3, 1, 2, 3)]
+                + [fdeal("2026-06", 200000, f, apt="비싼단지") for f in (20, 21, 22, 20, 21, 22)])
+        out = floor_premium(rows, min_group=6)
+        by = {b["bucket"]: b["premium_pct"] for b in out["buckets"]}
+        self.assertEqual(by["1~3층"], 0.0)
+        self.assertEqual(by["20층~"], 0.0)
+
+    def test_thin_groups_skipped(self):
+        rows = [fdeal("2026-06", 100000, 5), fdeal("2026-06", 100000, 6)]
+        out = floor_premium(rows, min_group=6)
+        self.assertEqual(out["groups_used"], 0)
+
+
+class ComplexHistoryTest(unittest.TestCase):
+    def test_only_requested_keys_returned_and_sorted(self):
+        rows = ([deal("2026-06", 100000, apt="가", area=84.9)]
+                + [deal("2026-05", 90000, apt="가", area=84.9)]
+                + [deal("2026-06", 70000, apt="나", area=59.9)])
+        out = complex_histories(rows, {("11680", "가", 84)})
+        self.assertEqual(list(out), ["11680|가|84"])
+        self.assertEqual([x["d"] for x in out["11680|가|84"]],
+                         ["2026-05-15", "2026-06-15"])   # 오래된 것부터
+
+    def test_truncates_to_recent_points(self):
+        rows = [deal(f"2026-{m:02d}", 100000 + m, apt="가") for m in range(1, 13)]
+        out = complex_histories(rows, {("11680", "가", 84)}, max_points=5)
+        hist = out["11680|가|84"]
+        self.assertEqual(len(hist), 5)
+        self.assertEqual(hist[-1]["d"], "2026-12-15")    # 최근이 남는다
 
 
 if __name__ == "__main__":
