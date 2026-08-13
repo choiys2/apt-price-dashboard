@@ -30,6 +30,7 @@ jobs:
         run: |
           python test_parse.py
           python test_analytics.py
+          python test_brief.py
 
       # 수집량이 임계치 미만이면 run_apt_pipeline.py 가 exit 2,
       # 거래 0건 시군구가 허용치를 넘으면 exit 3 으로 끝난다.
@@ -45,21 +46,28 @@ jobs:
             echo "::warning::수집이 임계치에 못 미쳤다. 다음 러너로 재시도한다."
           fi
 
+      # 대시보드는 열어야 보인다. 매 갱신마다 30초에 읽히는 텍스트 요약을 남겨
+      # 저장소만 봐도 상황을 알 수 있게 한다. reports/latest.md 가 항상 최신이다.
+      - name: 주간 브리핑 생성
+        if: steps.pipeline.outputs.healthy == 'true'
+        continue-on-error: true
+        run: python weekly_brief.py live/analytics.json reports/
+
       # 과거 월의 원본은 확정값이라 한 번 받아두면 다시 안 받는다.
       # 실패해도 항상 커밋한다. 받다 만 캐시를 버리면 다음 시도가 처음부터 다시
       # 받아야 하는데, 원본 캐시는 부분적이어도 그 자체로 유효하다. 시도를 거듭할수록
       # 캐시가 채워지므로, 러너가 계속 막혀도 결국 수렴한다.
-      - name: 원본 캐시 커밋 (data/)
+      - name: 원본 캐시·브리핑 커밋
         if: always()
         continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           # 디렉터리가 없으면 git add 가 exit 128 로 죽어 스텝 전체가 실패한다.
-          mkdir -p data/raw data/rent
-          git add -A data
+          mkdir -p data/raw data/rent reports
+          git add -A data reports
           git diff --cached --quiet && exit 0
-          git commit -m "chore: 실거래 원본 캐시 갱신 $(date -u +%F)"
+          git commit -m "chore: 실거래 캐시·브리핑 갱신 $(date -u +%F)"
           # 앞선 시도가 이미 푸시했을 수 있어 rebase 후 재시도한다.
           for i in 1 2 3; do
             git push && exit 0

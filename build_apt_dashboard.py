@@ -113,6 +113,13 @@ tbody tr:hover{background:var(--panel-2)}
 td.name{font-weight:560}
 .muted{color:var(--muted)}
 /* --- 면적 분포 --- */
+.budget-form{display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:13.5px}
+.budget-form label{display:flex;align-items:center;gap:7px;color:var(--muted)}
+.budget-form input{background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+  border-radius:8px;padding:7px 11px;font:inherit;font-size:13.5px;
+  font-variant-numeric:tabular-nums}
+.budget-form input[type=number]{width:110px;text-align:right}
+.budget-form input:focus{outline:none;border-color:var(--accent)}
 .dist{display:grid;gap:10px}
 .dist-row{display:grid;grid-template-columns:92px 1fr 232px;gap:12px;align-items:center;
   font-size:13.5px}
@@ -149,6 +156,29 @@ footer ul{padding-left:18px;margin:8px 0 0}
 <div class="filters" id="dealfilters"></div>
 
 <section class="kpis" id="kpis"></section>
+
+<section class="card" id="budget-card" style="display:none">
+  <h2>예산으로 찾기</h2>
+  <p class="sub" style="margin:0 0 14px">지역이 아니라 <b>예산</b>에서 출발한다.
+    같은 돈으로 어디에서 몇 평을 살 수 있는지 비교한다.</p>
+  <div class="budget-form">
+    <label>예산 <input type="number" id="b-budget" value="80000" step="5000" min="1000"> 만원
+      <span class="muted" id="b-budget-eok"></span></label>
+    <label>전용 <input type="number" id="b-area" value="84" step="1" min="10"> ㎡ 이상</label>
+    <label>지역 <input type="search" id="b-region" placeholder="전체 (예: 성남)"></label>
+  </div>
+  <p class="sub" id="b-summary" style="margin:12px 0"></p>
+  <div class="scroll"><table class="rh">
+    <thead><tr>
+      <th style="cursor:default">지역</th><th style="cursor:default">단지</th>
+      <th style="cursor:default">전용</th><th style="cursor:default">준공</th>
+      <th style="cursor:default">시세(중위)</th><th style="cursor:default">거래범위</th>
+      <th style="cursor:default">평당가</th><th style="cursor:default">거래</th>
+    </tr></thead>
+    <tbody id="b-body"></tbody>
+  </table></div>
+  <p class="sub" id="b-note" style="margin-top:10px"></p>
+</section>
 
 <section class="card">
   <div class="chart-head">
@@ -568,6 +598,52 @@ function renderRecordHighs(){
 const REGION_CODE = Object.fromEntries((D.regions || []).map(r => [r.region, r.lawd_cd]));
 function lawdOf(region){ return REGION_CODE[region] || ''; }
 
+/* ---------- 예산으로 찾기 ---------- */
+// price_index 는 키 이름을 뺀 배열로 실려 온다(13,000행에 키를 매번 실으면 3MB).
+const PI = D.price_index;
+const PIC = PI ? Object.fromEntries(PI.columns.map((c,i) => [c,i])) : {};
+
+function renderBudget(){
+  if (!PI || !PI.rows.length) return;
+  $('#budget-card').style.display = '';
+
+  const budget = +$('#b-budget').value || 0;
+  const minArea = +$('#b-area').value || 0;
+  const q = $('#b-region').value.trim();
+  $('#b-budget-eok').textContent = budget ? `(${(budget/10000).toFixed(1)}억)` : '';
+
+  const names = PI.region_names;
+  const c = PIC;
+  let hits = PI.rows.filter(r =>
+    r[c.median_amount] <= budget && r[c.area_type] >= minArea
+    && (!q || (names[r[c.lawd_cd]] || '').includes(q)));
+
+  // 예산 안에서 "가장 넓은 것"이 궁금하지, "가장 싼 것"이 궁금한 게 아니다.
+  hits.sort((a,b) => b[c.area_type] - a[c.area_type] || a[c.median_amount] - b[c.median_amount]);
+
+  const regions = new Set(hits.map(r => names[r[c.lawd_cd]]));
+  $('#b-summary').innerHTML = hits.length
+    ? `조건에 맞는 단지 <b style="color:var(--text)">${nf(hits.length)}</b>개 · `
+      + `<b style="color:var(--text)">${regions.size}</b>개 시군구 · `
+      + `최대 전용 <b style="color:var(--text)">${hits[0][c.area_type]}㎡</b>`
+    : '<span class="muted">조건에 맞는 단지가 없다. 예산을 올리거나 면적을 낮춰볼 것.</span>';
+
+  $('#b-body').innerHTML = hits.slice(0, 100).map(r => `<tr>
+      <td>${esc(names[r[c.lawd_cd]] || '')}</td>
+      <td class="name">${esc(r[c.apt])}</td>
+      <td>${r[c.area_type]}㎡</td>
+      <td>${r[c.build_year] ?? '–'}</td>
+      <td><b>${fmtAmount(r[c.median_amount])}</b></td>
+      <td class="muted">${fmtAmount(r[c.min_amount])}~${fmtAmount(r[c.max_amount])}</td>
+      <td>${nf(r[c.median_ppp])}</td>
+      <td>${r[c.count]}건</td>
+    </tr>`).join('');
+  $('#b-note').textContent =
+    `${PI.window[0]}~${PI.window[PI.window.length-1]} 중개거래 ${PI.min_deals}건 이상인 `
+    + `단지×전용타입 ${nf(PI.rows.length)}개가 대상이다. 전용면적이 넓은 순으로 상위 100개만 표시한다. `
+    + `시세는 그 기간 중위 거래가이므로 호가가 아니다.`;
+}
+
 /* ---------- 층별 프리미엄 ---------- */
 function renderFloorPremium(){
   const fp = D.floor_premium;
@@ -684,12 +760,14 @@ initTheme();
 renderMeta();
 renderDist();
 renderRecordHighs();
+renderBudget();
 renderFloorPremium();
 renderJeonse();
 renderDealType();
 renderAll();
 $('#csv').onclick = downloadCsv;
 $('#q').oninput = e => { query = e.target.value.trim(); renderTable(); };
+['#b-budget','#b-area','#b-region'].forEach(s => $(s).oninput = renderBudget);
 window.addEventListener('resize', renderChart);
 </script>
 </body>

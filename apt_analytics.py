@@ -318,6 +318,57 @@ def floor_premium(records, min_group=6, min_regions=1):
     return {"buckets": rows_out, "groups_used": used_groups, "min_group": min_group}
 
 
+def price_index(records, months, min_deals=3, recent_months=9):
+    """단지 × 면적타입별 시세 인덱스. "예산 8억으로 어디를 살 수 있나"의 재료다.
+
+    지금 대시보드는 지역 -> 가격 방향이다("강남구는 평당 1억"). 실사용자의 질문은
+    반대라서, 가격 -> 지역으로 뒤집으려면 단지 단위 시세표가 필요하다.
+
+    설계에서 정한 것:
+      - 거래 min_deals 건 미만은 버린다. 1~2건짜리 시세는 그 거래에 통째로 좌우된다.
+      - 최근 recent_months 개월 거래만 쓴다. 15개월 전 가격을 "지금 살 수 있는 값"으로
+        내놓으면 안 된다.
+      - 대표값은 중위다. 같은 단지·타입 안에서도 층·향 때문에 편차가 있다.
+    """
+    window = set(months[-recent_months:])
+    groups = defaultdict(list)
+    for r in records:
+        atype = _area_type(r)
+        if not atype or not r.get("apt") or r.get("amount_manwon") is None:
+            continue
+        if r["deal_ym"] not in window:
+            continue
+        groups[(r["lawd_cd"], r["region"], r["apt"], atype)].append(r)
+
+    # 13,000행에 딕셔너리 키 이름을 매번 싣으면 JSON 이 3MB 를 넘는다(키 이름만
+    # 행당 110바이트). 배열로 눕히고 지역명은 코드->이름 표로 한 번만 싣는다.
+    # 순서는 아래 COLUMNS 와 정확히 일치해야 한다.
+    region_names = {}
+    rows = []
+    for (code, region, apt, atype), rs in groups.items():
+        if len(rs) < min_deals:
+            continue
+        region_names[code] = region
+        amts = sorted(r["amount_manwon"] for r in rs)
+        ppps = [r["price_per_pyeong"] for r in rs if r.get("price_per_pyeong")]
+        rows.append([
+            code, apt, atype,
+            round(median(amts)), amts[0], amts[-1],
+            len(rs),
+            round(median(ppps)) if ppps else None,
+            rs[-1].get("build_year"),
+        ])
+    rows.sort(key=lambda r: r[3])
+    return {
+        "columns": ["lawd_cd", "apt", "area_type", "median_amount",
+                    "min_amount", "max_amount", "count", "median_ppp", "build_year"],
+        "rows": rows,
+        "region_names": region_names,
+        "window": months[-recent_months:],
+        "min_deals": min_deals,
+    }
+
+
 def deal_type_stats(records):
     """중개거래와 직거래를 갈라서 비교한다.
 
@@ -497,6 +548,9 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
     keys = {(code_by_region.get(reg), apt, at) for reg, apt, at in keys if code_by_region.get(reg)}
     result["complex_history"] = complex_histories(records, keys)
     result["floor_premium"] = floor_premium(records)
+    # 예산 역질의용 시세 인덱스. 직거래는 시세보다 28.5% 낮게 신고되는 경우가 많아
+    # "이 값이면 살 수 있다"는 표에 섞으면 안 된다.
+    result["price_index"] = price_index(broker or records, months)
 
     if rent_payload:
         rr = rent_payload.get("records", [])
@@ -545,6 +599,9 @@ def main():
         j = result["jeonse"]
         print(f"  전세가율 중위 {j['overall_pct']}% "
               f"(단지x타입 {j['matched_pairs']:,}쌍 매칭, 시군구 {len(j['regions'])}개)")
+    pi = result["price_index"]
+    print(f"  시세 인덱스 {len(pi['rows']):,}개 단지x타입 "
+          f"({pi['window'][0]}~{pi['window'][-1]}, {pi['min_deals']}건 이상)")
     missing = result["meta"]["missing_regions"]
     if missing:
         print(f"  ! 거래 0건 시군구 {len(missing)}개: "
