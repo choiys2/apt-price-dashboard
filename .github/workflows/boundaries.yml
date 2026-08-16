@@ -1,0 +1,49 @@
+name: 경계 데이터 준비 (1회성)
+
+# 실거래가 API 에는 좌표가 없어 시군구 경계를 외부에서 가져온다. 에이전트 환경에서는
+# 외부 접근이 막혀 있어 러너에서 받아 저장소에 커밋한다. 행정구역이 바뀌지 않는 한
+# 다시 돌릴 일이 없어 수동 실행으로 둔다.
+on:
+  workflow_dispatch:
+    inputs:
+      tol:
+        description: "단순화 허용오차(도). 클수록 가볍고 거칠다"
+        required: true
+        default: "0.0015"
+      inspect:
+        description: "원본 속성만 확인하고 끝낼지 (true/false)"
+        required: true
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  boundaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 경계 준비
+        run: |
+          if [ "${{ inputs.inspect }}" = "true" ]; then
+            python fetch_boundaries.py --inspect
+          else
+            python fetch_boundaries.py --tol "${{ inputs.tol }}" --out data/boundaries.json
+          fi
+
+      - name: 커밋
+        if: inputs.inspect != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A data/boundaries.json
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: 수도권 시군구 경계 데이터 갱신"
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase origin main || true
+          done
