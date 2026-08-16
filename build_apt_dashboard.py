@@ -1015,14 +1015,19 @@ function cellValue(cell, key, mi){
   return den ? num / den : null;
 }
 
-function mapDomain(key){
-  // 재생 중에 색이 매달 다시 잡히면 아무것도 변하지 않는 것처럼 보인다.
-  // 전체 기간과 모든 달을 한꺼번에 넣어 눈금을 한 번만 정한다.
+function mapDomain(key, scope){
+  // 눈금을 두 벌로 나눈다.
+  //   scope='static'  — 전체 기간 한 장. 그 화면의 최대·최소에 눈금을 꽉 채운다.
+  //   scope='monthly' — 모든 달을 한꺼번에 넣어 재생 내내 고정한다. 매달 다시 잡으면
+  //                     색이 늘 같아 보여서 아무것도 변하지 않는 것처럼 읽힌다.
+  // 한 벌로 합치면 월별 최대치(표본이 얇은 달에 튄다)가 눈금 위쪽을 먹어버려,
+  // 정작 첫 화면인 전체 기간이 램프의 아래쪽에만 몰린다(실측: 강남 10,939인데
+  // 눈금 상한이 12,907이라 최고가 지역이 빨강까지 가지 못했다).
   const met = METRICS[key], cells = Object.keys(GEO.cells);
   const vals = [];
   const push = mi => { for (const c of cells){ const v = cellValue(c, key, mi); if (v != null) vals.push(v); } };
-  push(null);
-  if (met.monthly) (D.region_monthly?.months || []).forEach((_, i) => push(i));
+  if (scope === 'monthly' && met.monthly) (D.region_monthly?.months || []).forEach((_, i) => push(i));
+  else push(null);
   if (!vals.length) return {lo:0, hi:1, ramp:RAMP_SEQ, kind:'seq', norm:() => 0, height:() => 0};
 
   if (met.kind === 'div'){
@@ -1041,8 +1046,9 @@ function mapDomain(key){
 // 애초에 시점이 바뀐다고 눈금이 달라지지도 않는다.
 let _dom = {k:null, v:null};
 function domainFor(key){
-  const k = [key, dealType, BST.budget, BST.area].join('|');
-  if (_dom.k !== k) _dom = {k, v: mapDomain(key)};
+  const scope = MAP.month == null ? 'static' : 'monthly';
+  const k = [key, scope, dealType, BST.budget, BST.area].join('|');
+  if (_dom.k !== k) _dom = {k, v: mapDomain(key, scope)};
   return _dom.v;
 }
 
