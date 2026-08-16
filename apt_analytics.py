@@ -388,6 +388,31 @@ def deal_type_stats(records):
     }
 
 
+def region_monthly(records, months, min_samples=5):
+    """시군구 × 월 요약. 입체 지도의 시간 재생(월을 넘기며 높이가 변하는 화면)에 쓴다.
+
+    행마다 키 이름을 싣지 않고 월 순서에 맞춘 배열로 눕힌다. 83개 시군구 × 15개월에
+    {"ym":..,"count":..,"median_ppp":..} 를 다 실으면 60KB 가 넘는데, 배열이면 6KB다.
+    표본이 min_samples 미만인 달은 중위 평당가를 비운다. 2~3건짜리 중위값으로 지도
+    기둥이 솟으면 근거 없는 변동을 시장 변화처럼 보여주게 된다.
+    """
+    idx = {ym: i for i, ym in enumerate(months)}
+    out = {}
+    for code, group in _group(records, lambda r: r["lawd_cd"]).items():
+        counts = [0] * len(months)
+        ppps = [None] * len(months)
+        for ym, rs in _group(group, lambda r: r["deal_ym"]).items():
+            i = idx.get(ym)
+            if i is None:
+                continue
+            counts[i] = len(rs)
+            vals = [r["price_per_pyeong"] for r in rs if r.get("price_per_pyeong")]
+            if len(vals) >= min_samples:
+                ppps[i] = round(median(vals))
+        out[code] = {"count": counts, "ppp": ppps}
+    return {"months": months, "min_samples": min_samples, "regions": out}
+
+
 def missing_regions(records, expected):
     """수집 대상인데 거래가 한 건도 없는 시군구.
 
@@ -505,6 +530,9 @@ def _views(records, months):
         "monthly": monthly_series(records, months),
         "sido": sido_rollup(records, months),
         "regions": region_ranking(records, months),
+        # 입체 지도의 시간 재생용. 전체본/중개거래본이 각자 갖고 있어야 지도에서
+        # 직거래를 빼도 재생이 같은 기준으로 돈다.
+        "region_monthly": region_monthly(records, months),
     }
 
 

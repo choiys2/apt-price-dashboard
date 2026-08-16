@@ -18,7 +18,7 @@ import os
 import sys
 
 from apt_analytics import analyze
-from build_apt_dashboard import render
+from build_apt_dashboard import load_boundaries, render
 import fetch_apt_rents
 from fetch_apt_trades import CACHE_DIR, collect, load_config
 from lawd_codes import regions
@@ -41,6 +41,9 @@ def main():
     ap.add_argument("--max-missing-regions", type=int, default=2,
                     help="거래 0건 시군구가 이 수를 넘으면 코드 테이블이 어긋난 것으로 보고 "
                          "exit 3 (기본 2 - 옹진군처럼 실제로 거래가 없는 지역 여유분)")
+    ap.add_argument("--boundaries", default="data/boundaries.json",
+                    help="시군구 경계 파일. 없으면 입체 지도 탭만 빠지고 나머지는 그대로 나온다 "
+                         "(fetch_boundaries.py 로 만든다)")
     ap.add_argument("--with-rent", action="store_true",
                     help="전월세도 수집해 전세가율을 산출한다 (호출량이 약 2배가 된다)")
     ap.add_argument("--sample", action="store_true",
@@ -133,8 +136,12 @@ def main():
           f"중위 평당가 {k['median_ppp']:,}만원")
 
     print("[3/3] 대시보드 생성")
-    render(analytics, html_path)
-    print(f"  -> {html_path} ({os.path.getsize(html_path)/1024:.0f}KB)")
+    geo = load_boundaries(args.boundaries)
+    if geo is None:
+        print(f"  ! 경계 파일이 없어 입체 지도 탭을 뺐다 ({args.boundaries})", file=sys.stderr)
+    render(analytics, html_path, boundaries=geo)
+    print(f"  -> {html_path} ({os.path.getsize(html_path)/1024:.0f}KB)"
+          + (f" · 지도 셀 {len(geo['cells'])}개" if geo else ""))
     print(f"\n완료. {html_path} 를 브라우저로 열어 확인할 것.")
 
 

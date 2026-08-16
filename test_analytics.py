@@ -6,8 +6,8 @@ from apt_analytics import (
     PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym,
     _same_month_last_year, analyze, area_distribution, build_kpi, cancel_rate_series,
     deal_type_stats, missing_regions, monthly_series, record_highs, reference_month,
-    complex_histories, floor_premium, jeonse_ratio, region_ranking, summarize,
-    umd_ranking,
+    complex_histories, floor_premium, jeonse_ratio, region_monthly, region_ranking,
+    summarize, umd_ranking,
 )
 
 
@@ -433,6 +433,49 @@ class ComplexHistoryTest(unittest.TestCase):
         hist = out["11680|가|84"]
         self.assertEqual(len(hist), 5)
         self.assertEqual(hist[-1]["d"], "2026-12-15")    # 최근이 남는다
+
+
+class RegionMonthlyTest(unittest.TestCase):
+    """입체 지도의 시간 재생이 읽는 표. 월 순서에 맞춘 배열이 계약 조건이다."""
+
+    def test_arrays_align_with_month_order_and_fill_gaps(self):
+        months = ["2026-04", "2026-05", "2026-06"]
+        rows = [rec("2026-04", 100), rec("2026-06", 200), rec("2026-06", 300)]
+        out = region_monthly(rows, months, min_samples=1)
+        self.assertEqual(out["months"], months)
+        e = out["regions"]["11680"]
+        self.assertEqual(e["count"], [1, 0, 2])          # 거래 없는 달도 자리를 지킨다
+        self.assertEqual(e["ppp"], [100, None, 250])
+
+    def test_thin_month_leaves_price_blank_but_keeps_count(self):
+        # 두세 건짜리 중위값으로 지도 기둥이 솟으면 근거 없는 변동을 시장 변화처럼
+        # 보여주게 된다. 건수는 남기되 단가만 비운다.
+        months = ["2026-06"]
+        out = region_monthly([rec("2026-06", 100), rec("2026-06", 900)], months,
+                             min_samples=5)
+        e = out["regions"]["11680"]
+        self.assertEqual(e["count"], [2])
+        self.assertIsNone(e["ppp"][0])
+
+    def test_months_outside_window_are_ignored(self):
+        out = region_monthly([rec("2025-01", 100), rec("2026-06", 200)],
+                             ["2026-06"], min_samples=1)
+        self.assertEqual(out["regions"]["11680"]["count"], [1])
+
+    def test_each_region_gets_its_own_row(self):
+        rows = [rec("2026-06", 100), rec("2026-06", 300, code="41135")]
+        out = region_monthly(rows, ["2026-06"], min_samples=1)
+        self.assertEqual(set(out["regions"]), {"11680", "41135"})
+
+    def test_both_views_carry_their_own_series(self):
+        # 지도에서 "중개거래만"을 켜도 재생이 같은 기준으로 돌아야 한다.
+        rows = [dict(rec("2026-06", 100), deal_gbn="중개거래") for _ in range(3)]
+        rows += [dict(rec("2026-06", 900), deal_gbn="직거래")]
+        out = analyze({"meta": {}, "records": rows})
+        self.assertIn("region_monthly", out)
+        self.assertIn("region_monthly", out["broker"])
+        self.assertEqual(out["region_monthly"]["regions"]["11680"]["count"], [4])
+        self.assertEqual(out["broker"]["region_monthly"]["regions"]["11680"]["count"], [3])
 
 
 if __name__ == "__main__":

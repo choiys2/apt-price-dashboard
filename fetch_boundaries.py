@@ -27,14 +27,17 @@ from urllib.request import Request, urlopen
 
 from lawd_codes import REGIONS
 
-# 단순화 버전을 먼저 시도한다. 원본은 수 MB 라 웹 페이지에 싣기 어렵다.
+# 원본(전체 해상도)을 먼저 쓴다. 저장소가 제공하는 _simple 판은 시군구당 좌표가
+# 18개뿐이라 허용오차를 아무리 낮춰도 그 이상 정밀해지지 않는다(실측: tol 0.0015 와
+# 0.0002 의 결과가 1,449 대 1,469 점으로 사실상 같았다). 원본 1,227,389 점을 우리가
+# 직접 단순화하는 편이 같은 용량에서 훨씬 나은 윤곽을 준다.
 SOURCES = [
+    "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/"
+    "kostat/2013/json/skorea_municipalities_geo.json",
     "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/"
     "kostat/2013/json/skorea_municipalities_geo_simple.json",
     "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/"
     "kostat/2013/json/skorea-municipalities-2013-geo.json",
-    "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/"
-    "kostat/2013/json/municipalities-geo-simple.json",
 ]
 
 # 실측(2013 KOSTAT): 코드 체계가 법정동코드와 다르다. 서울 11, 인천 23, 경기 31 이고
@@ -60,22 +63,29 @@ MERGED_CELLS = {
 }
 
 
-def download(url, timeout=30):
+def download(url, timeout=120):
     req = Request(url, headers={"User-Agent": "apt-price-dashboard/1.0"})
     with urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8")
 
 
-def load_source(urls=SOURCES):
-    """후보 URL 을 순서대로 시도한다. 저장소 파일명이 바뀌어도 버티게 한다."""
+def load_source(urls=SOURCES, attempts=5):
+    """후보 URL 을 순서대로 시도한다. 저장소 파일명이 바뀌어도 버티게 한다.
+
+    같은 URL 을 여러 번 시도하는 이유: 원본은 55MB 라 IncompleteRead 로 끊기는 일이
+    잦은데(실측), 한 번 실패했다고 다음 후보로 넘어가면 해상도가 10분의 1인 _simple
+    판으로 조용히 내려앉는다. 결과 파일만 봐서는 알 수 없는 종류의 퇴화다.
+    """
     last = None
     for url in urls:
-        try:
-            print(f"  시도: {url.rsplit('/', 1)[-1]}")
-            return json.loads(download(url)), url
-        except Exception as e:                      # noqa: BLE001 - 다음 후보로 넘어간다
-            last = f"{type(e).__name__}: {e}"
-            print(f"    실패 — {last}")
+        name = url.rsplit("/", 1)[-1]
+        for i in range(1, attempts + 1):
+            try:
+                print(f"  시도: {name}" + (f" ({i}/{attempts})" if i > 1 else ""))
+                return json.loads(download(url)), url
+            except Exception as e:                  # noqa: BLE001 - 재시도 후 다음 후보로
+                last = f"{type(e).__name__}: {e}"
+                print(f"    실패 — {last}")
     raise SystemExit(f"경계 데이터를 받지 못했다. 마지막 오류: {last}")
 
 
@@ -90,17 +100,42 @@ def _perp_distance(pt, a, b):
 
 
 def simplify(points, tol):
-    """Douglas-Peucker. 외부 의존성 없이 좌표 수를 줄인다."""
-    if len(points) < 3:
-        return points
-    dmax, idx = 0.0, 0
-    for i in range(1, len(points) - 1):
-        d = _perp_distance(points[i], points[0], points[-1])
-        if d > dmax:
-            dmax, idx = d, i
-    if dmax <= tol:
-        return [points[0], points[-1]]
-    return simplify(points[:idx + 1], tol)[:-1] + simplify(points[idx:], tol)
+    """Douglas-Peucker(반복형). 외부 의존성 없이 좌표 수를 줄인다.
+
+    재귀로 쓰면 원본 해안선 링(한 개가 10만 점을 넘는다)에서 스택이 터진다.
+    분할 구간을 명시적 스택에 쌓아 깊이 제한을 받지 않게 했다.
+    """
+    n = len(points)
+    if n < 3:
+        return list(points)
+    keep = [False] * n
+    keep[0] = keep[n - 1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        lo, hi = stack.pop()
+        if hi - lo < 2:
+            continue
+        a, b = points[lo], points[hi]
+        dmax, idx = 0.0, lo
+        for i in range(lo + 1, hi):
+            d = _perp_distance(points[i], a, b)
+            if d > dmax:
+                dmax, idx = d, i
+        if dmax > tol:
+            keep[idx] = True
+            stack.append((lo, idx))
+            stack.append((idx, hi))
+    return [points[i] for i in range(n) if keep[i]]
+
+
+def ring_area(points):
+    """신발끈 공식. 부호는 감김 방향(양수=반시계)."""
+    s = 0.0
+    for i in range(len(points)):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % len(points)]
+        s += x1 * y2 - x2 * y1
+    return s / 2.0
 
 
 def rings_of(geometry):
@@ -129,7 +164,7 @@ def feature_code(props):
     return ""
 
 
-def build(geo, tol, min_area_points=8):
+def build(geo, tol, min_points=6, max_rings=4, island_ratio=0.06):
     """2013 행정구역 셀 -> 외곽 링, 그리고 우리 시군구 -> 셀 대응표를 만든다.
 
     신설 구는 경계가 없으므로 옛 모구 셀에 합산한다. 지도는 2013 단위로 그려지고
@@ -142,14 +177,48 @@ def build(geo, tol, min_area_points=8):
         if code[:2] in ("11", "23", "31") and name:
             by_key.setdefault((code[:2], name.replace(" ", "")), []).append(f)
 
+    def thin(pts):
+        """고정 허용오차로는 작은 구가 통째로 사라진다. 모양이 남을 때까지 줄인다.
+
+        실측: tol=0.0015 로 일괄 단순화하면 서울 중구·성동구·중랑구·서대문구·금천구와
+        수원 팔달구 6개가 점 6개 미만으로 뭉개져 지도에서 빠졌다. 면적이 작을수록
+        같은 허용오차가 상대적으로 크게 작용하기 때문이라, 링마다 허용오차를 낮춰가며
+        형태가 남는 지점을 찾는다. 큰 구는 첫 시도에서 끝나 좌표 수가 늘지 않는다.
+        """
+        t = tol
+        for _ in range(8):
+            s = simplify(pts, t)
+            if len(s) >= min_points:
+                return s
+            t /= 2
+        return simplify(pts, t)
+
     def rings_for(feats):
-        rings = []
+        """면적이 큰 링부터 담는다. 가장 큰 링(본토)은 무슨 일이 있어도 남긴다.
+
+        부속 섬은 본토 면적의 island_ratio 이상인 것만, 최대 max_rings 개까지 남긴다.
+        강화군·옹진군은 원본에 작은 섬이 수십 개씩 들어 있어 전부 세우면 입체 지도가
+        점으로 뒤덮인다. 자르지 않으면 링이 290개인데, 자르면 지도가 읽힌다.
+        """
+        cand = []
         for f in feats:
             for ring in rings_of(f.get("geometry")):
-                pts = [(round(x, 4), round(y, 4)) for x, y in ring]
-                s = simplify(pts, tol)
-                if len(s) >= min_area_points:
-                    rings.append(s)
+                pts = [(round(x, 5), round(y, 5)) for x, y in ring]
+                if len(pts) >= 4:
+                    cand.append((abs(ring_area(pts)), pts))
+        cand.sort(key=lambda t: t[0], reverse=True)
+        if not cand:
+            return []
+        main_area = cand[0][0] or 1.0
+        rings = []
+        for i, (area, pts) in enumerate(cand[:max_rings]):
+            if i and (area / main_area < island_ratio):
+                break
+            s = thin(pts)
+            # 섬을 거르는 기준은 면적(위의 island_ratio)이지 점 개수가 아니다.
+            # 모양이 단순해서 점이 적은 섬까지 떨어뜨리면 안 된다 — 점 4개면 다각형이다.
+            if i == 0 or len(s) >= 4:
+                rings.append([(round(x, 4), round(y, 4)) for x, y in s])
         return rings
 
     merged_member = {m: cell for cell, spec in MERGED_CELLS.items()
@@ -160,7 +229,7 @@ def build(geo, tol, min_area_points=8):
     for cell, spec in MERGED_CELLS.items():
         prefix = KOSTAT_SIDO["인천광역시" if cell.startswith("인천") else "경기도"]
         feats = [f for n in spec["old_names"] for f in by_key.get((prefix, n), [])]
-        rings = rings_for(feats)
+        rings = rings_for(feats) if feats else []
         if rings:
             cells[cell] = rings
             labels[cell] = spec["label"]
@@ -192,8 +261,10 @@ def build(geo, tol, min_area_points=8):
 def main():
     ap = argparse.ArgumentParser(description="수도권 시군구 경계 준비")
     ap.add_argument("--out", default="data/boundaries.json")
-    ap.add_argument("--tol", type=float, default=0.0015,
-                    help="단순화 허용오차(도). 클수록 가벼워지고 거칠어진다")
+    ap.add_argument("--tol", type=float, default=0.002,
+                    help="단순화 허용오차(도). 클수록 가벼워지고 거칠어진다. "
+                         "기본 0.002 는 실측으로 좌표 4,077개(80KB) — 입체 지도를 "
+                         "끌면서 돌려도 끊기지 않는 상한이다")
     ap.add_argument("--inspect", action="store_true",
                     help="원본 속성 이름과 샘플만 출력하고 끝낸다")
     args = ap.parse_args()
@@ -224,6 +295,23 @@ def main():
 
     cells, cell_of, labels, missing = build(geo, args.tol)
     total_pts = sum(len(r) for rs in cells.values() for r in rs)
+    coarse = "_simple" in url
+
+    # 저해상도 판으로 만든 결과가 이미 있는 좋은 파일을 덮어쓰면, 실패한 실행이
+    # 성공한 실행의 결과를 지우는 셈이 된다. 다운로드가 끊기는 일이 잦아 실제로 겪었다.
+    if coarse and os.path.exists(args.out):
+        try:
+            with open(args.out, encoding="utf-8") as f:
+                prev = json.load(f)
+            prev_pts = sum(len(r) for rs in prev.get("cells", {}).values() for r in rs)
+        except (OSError, json.JSONDecodeError):
+            prev_pts = 0
+        if prev_pts >= total_pts:
+            print(f"\n[중단] 원본을 받지 못해 저해상도 판({total_pts:,}점)이 나왔는데 "
+                  f"기존 파일이 더 낫다({prev_pts:,}점). 덮어쓰지 않는다. 다시 실행할 것.",
+                  file=sys.stderr)
+            raise SystemExit(1)
+
     payload = {
         "source": url,
         "license": "KOSTAT (southkorea/southkorea-maps) - free to share or remix",
@@ -241,9 +329,16 @@ def main():
 
     print(f"\n완료 -> {args.out} ({os.path.getsize(args.out)/1024:.0f}KB)")
     print(f"  지도 셀 {len(cells)}개 · 시군구 {len(cell_of)}/{len(REGIONS)}개 매핑 "
-          f"· 좌표 {total_pts:,}개")
+          f"· 링 {sum(len(v) for v in cells.values())}개 · 좌표 {total_pts:,}개")
+    if coarse:
+        # 원본 다운로드가 끊기면 해상도가 10분의 1인 판으로 내려앉는데, 결과 파일만
+        # 봐서는 구별되지 않는다. 조용히 넘어가지 않게 표준오류로 알린다.
+        print("  ! 원본을 받지 못해 저해상도 _simple 판으로 만들었다. 좌표가 시군구당 "
+              "18개뿐이라 윤곽이 거칠다. 다시 실행할 것.", file=sys.stderr)
     if missing:
         print(f"  ! 경계를 못 찾은 {len(missing)}개: " + ", ".join(missing), file=sys.stderr)
+    if missing or coarse:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

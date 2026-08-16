@@ -31,6 +31,7 @@ jobs:
           python test_parse.py
           python test_analytics.py
           python test_brief.py
+          python test_boundaries.py
 
       # 수집량이 임계치 미만이면 run_apt_pipeline.py 가 exit 2,
       # 거래 0건 시군구가 허용치를 넘으면 exit 3 으로 끝난다.

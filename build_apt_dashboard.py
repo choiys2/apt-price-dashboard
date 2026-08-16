@@ -2,13 +2,18 @@
 """
 집계 결과 -> 단일 HTML 대시보드
 
-외부 CDN을 쓰지 않는다. 차트는 인라인 SVG를 바닐라 JS로 그리고, 데이터는 HTML 안에
-JSON으로 심는다. 파일 하나만 열면 오프라인에서도 그대로 동작한다.
+외부 CDN을 쓰지 않는다. 차트와 입체 지도는 인라인 SVG를 바닐라 JS로 그리고, 데이터는
+HTML 안에 JSON으로 심는다. 파일 하나만 열면 오프라인에서도 그대로 동작한다.
+
+지도가 왜 SVG 로 직접 그린 축측투영인가: 지도 라이브러리를 쓰면 CDN 의존이 생기고
+타일 서버까지 붙는다. 이 저장소는 "파일 하나로 끝난다"를 유지하려고 표준 라이브러리와
+바닐라 JS 만 쓴다. 기둥을 세우는 정도의 3D 는 직접 투영하는 편이 오히려 가볍다.
 
 사용법:
-  python build_apt_dashboard.py live/analytics.json live/index.html
+  python build_apt_dashboard.py live/analytics.json live/index.html [data/boundaries.json]
 """
 import json
+import os
 import sys
 
 PAGE = r"""<!doctype html>
@@ -22,12 +27,14 @@ PAGE = r"""<!doctype html>
   --bg:#0d1524; --panel:#141f36; --panel-2:#1b2942; --line:#26375a;
   --text:#e6edf8; --muted:#8ba0c4; --accent:#4b8ef7; --accent-soft:#1e3a68;
   --up:#f0715f; --down:#4aa3e0;
+  --void:#0a1120; --void-2:#101b30;
   --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.28);
 }
 html[data-theme="light"]{
   --bg:#eef3fa; --panel:#fff; --panel-2:#f4f7fc; --line:#dce5f2;
   --text:#16233a; --muted:#61728d; --accent:#2563eb; --accent-soft:#dbe8fe;
   --up:#d1483a; --down:#1d6fa8;
+  --void:#e4ecf7; --void-2:#f2f6fc;
   --shadow:0 1px 2px rgba(20,40,80,.06),0 8px 24px rgba(20,40,80,.08);
 }
 *{box-sizing:border-box}
@@ -40,7 +47,7 @@ h1{font-size:23px;margin:0 0 4px;letter-spacing:-.02em}
 h2{font-size:16px;margin:0 0 14px;letter-spacing:-.01em}
 .sub{color:var(--muted);font-size:13.5px;margin:0}
 header.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;
-  flex-wrap:wrap;margin-bottom:22px}
+  flex-wrap:wrap;margin-bottom:18px}
 button{font:inherit;color:inherit;cursor:pointer;background:none;border:none}
 .ghost{border:1px solid var(--line);background:var(--panel);border-radius:8px;
   padding:6px 12px;font-size:13px;transition:border-color .15s,background .15s}
@@ -52,6 +59,13 @@ html[data-theme="light"] .banner{background:#fdeae6;border-color:#f0b3a5;color:#
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
   padding:18px 20px;box-shadow:var(--shadow)}
 section{margin-bottom:20px}
+/* --- 탭 --- */
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:20px}
+.tab{padding:10px 20px;font-size:14.5px;color:var(--muted);margin-bottom:-1px;
+  border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.tab[aria-selected="true"]{color:var(--text);font-weight:650;border-bottom-color:var(--accent)}
+.tab:hover{color:var(--text)}
+.tab .badge{font-size:11.5px;color:var(--muted);margin-left:6px;font-weight:400}
 /* --- 필터 --- */
 .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:18px}
 .chip{border:1px solid var(--line);background:var(--panel);border-radius:999px;
@@ -83,8 +97,51 @@ svg{display:block;width:100%;height:auto;overflow:visible}
 .pline{fill:none;stroke:var(--up);stroke-width:2.2;stroke-linejoin:round}
 .pline.prov{stroke-dasharray:5 4}
 .pdot{fill:var(--up)}
-.hit{fill:transparent;cursor:pointer}
-.hit:hover~.hover-bg,.hit:hover{outline:none}
+/* --- 입체 지도 --- */
+.mapctl{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-bottom:14px;
+  font-size:13px;color:var(--muted)}
+.mapctl label{display:flex;align-items:center;gap:7px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.seg button{padding:6px 13px;font-size:13px;color:var(--muted);
+  border-right:1px solid var(--line);transition:background .15s,color .15s}
+.seg button:last-child{border-right:none}
+.seg button[aria-pressed="true"]{background:var(--accent-soft);color:var(--text);font-weight:600}
+.seg button:hover{color:var(--text)}
+input[type=range]{accent-color:var(--accent);width:104px;vertical-align:middle}
+.stage{position:relative;border-radius:12px;overflow:hidden;touch-action:none;
+  cursor:grab;background:
+    radial-gradient(120% 90% at 50% 8%, var(--void-2) 0%, var(--void) 62%, var(--bg) 100%);
+  border:1px solid var(--line)}
+.stage.drag{cursor:grabbing}
+.stage svg{width:100%;height:auto;display:block;overflow:visible}
+.stage g[data-cell]{transition:none}
+.stage g[data-cell]:hover{filter:brightness(1.22)}
+.stage g.sel{filter:brightness(1.3) drop-shadow(0 0 7px rgba(120,180,255,.55))}
+.plate{fill:none;stroke:var(--line);stroke-width:.7;opacity:.5}
+.maplabel{fill:var(--text);font-size:10.5px;font-weight:650;paint-order:stroke;
+  stroke:rgba(0,0,0,.55);stroke-width:2.6px;pointer-events:none}
+html[data-theme="light"] .maplabel{stroke:rgba(255,255,255,.8)}
+.tip{position:absolute;pointer-events:none;left:0;top:0;z-index:3;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:9px 12px;font-size:12.5px;box-shadow:var(--shadow);white-space:nowrap;
+  opacity:0;transition:opacity .12s;font-variant-numeric:tabular-nums}
+.tip b{font-size:13.5px}
+.tip .parts{color:var(--muted);font-size:11.5px;margin-top:3px}
+.mapfoot{display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin-top:14px;
+  font-size:12.5px;color:var(--muted)}
+.rampbar{height:11px;border-radius:6px;width:190px;border:1px solid var(--line)}
+.month-pill{font-variant-numeric:tabular-nums;background:var(--panel-2);
+  border:1px solid var(--line);border-radius:999px;padding:3px 11px;font-size:12.5px}
+.mapgrid{display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start}
+@media(max-width:900px){.mapgrid{grid-template-columns:1fr}}
+.rankbar{display:grid;grid-template-columns:88px 1fr 76px;gap:9px;align-items:center;
+  font-size:12.5px;padding:2px 0;cursor:pointer;border-radius:6px}
+.rankbar:hover{background:var(--panel-2)}
+.rankbar.sel{background:var(--accent-soft)}
+.rankbar .rt{background:var(--panel-2);border-radius:4px;height:13px;overflow:hidden}
+.rankbar .rf{height:100%;border-radius:4px}
+.rankbar .rv{text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)}
+.ranklist{max-height:452px;overflow-y:auto;padding-right:4px}
 /* --- 테이블 --- */
 .table-head{display:flex;justify-content:space-between;align-items:center;
   gap:12px;flex-wrap:wrap;margin-bottom:12px}
@@ -112,7 +169,7 @@ tbody tr:hover{background:var(--panel-2)}
 .hist-item.cur{border-color:var(--up);color:var(--text)}
 td.name{font-weight:560}
 .muted{color:var(--muted)}
-/* --- 면적 분포 --- */
+/* --- 예산 폼 / 분포 막대 --- */
 .budget-form{display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:13.5px}
 .budget-form label{display:flex;align-items:center;gap:7px;color:var(--muted)}
 .budget-form input{background:var(--panel-2);border:1px solid var(--line);color:var(--text);
@@ -136,6 +193,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
   .kpi .value{font-size:23px}
   .dist-row{grid-template-columns:74px 1fr;grid-template-areas:"a b" "c c"}
   .dist-val{grid-area:c;text-align:left}
+  .tab{padding:9px 13px;font-size:13.5px}
 }
 </style>
 </head>
@@ -152,33 +210,18 @@ footer ul{padding-left:18px;margin:8px 0 0}
 
 <div id="banner"></div>
 
+<nav class="tabs" id="tabs" role="tablist">
+  <button class="tab" role="tab" data-tab="overview" aria-selected="true">개요</button>
+  <button class="tab" role="tab" data-tab="map" aria-selected="false">입체 지도<span class="badge">3D</span></button>
+</nav>
+
 <div class="filters" id="filters"></div>
 <div class="filters" id="dealfilters"></div>
 
-<section class="kpis" id="kpis"></section>
+<!-- ===================== 개요 ===================== -->
+<div id="pane-overview">
 
-<section class="card" id="budget-card" style="display:none">
-  <h2>예산으로 찾기</h2>
-  <p class="sub" style="margin:0 0 14px">지역이 아니라 <b>예산</b>에서 출발한다.
-    같은 돈으로 어디에서 몇 평을 살 수 있는지 비교한다.</p>
-  <div class="budget-form">
-    <label>예산 <input type="number" id="b-budget" value="80000" step="5000" min="1000"> 만원
-      <span class="muted" id="b-budget-eok"></span></label>
-    <label>전용 <input type="number" id="b-area" value="84" step="1" min="10"> ㎡ 이상</label>
-    <label>지역 <input type="search" id="b-region" placeholder="전체 (예: 성남)"></label>
-  </div>
-  <p class="sub" id="b-summary" style="margin:12px 0"></p>
-  <div class="scroll"><table class="rh">
-    <thead><tr>
-      <th style="cursor:default">지역</th><th style="cursor:default">단지</th>
-      <th style="cursor:default">전용</th><th style="cursor:default">준공</th>
-      <th style="cursor:default">시세(중위)</th><th style="cursor:default">거래범위</th>
-      <th style="cursor:default">평당가</th><th style="cursor:default">거래</th>
-    </tr></thead>
-    <tbody id="b-body"></tbody>
-  </table></div>
-  <p class="sub" id="b-note" style="margin-top:10px"></p>
-</section>
+<section class="kpis" id="kpis"></section>
 
 <section class="card">
   <div class="chart-head">
@@ -249,6 +292,102 @@ footer ul{padding-left:18px;margin:8px 0 0}
     낮게 신고되는 경우가 많다. 위 필터의 "중개거래만"으로 제외하고 볼 수 있다.</p>
 </section>
 
+<!-- 예산으로 찾기는 개요의 마지막 칸이다. 앞의 지표들을 다 본 뒤
+     "그래서 내 돈으로는 어디?"로 넘어가는 순서가 자연스럽다. -->
+<section class="card" id="budget-card" style="display:none">
+  <h2>예산으로 찾기</h2>
+  <p class="sub" style="margin:0 0 14px">지역이 아니라 <b>예산</b>에서 출발한다.
+    같은 돈으로 어디에서 몇 평을 살 수 있는지 비교한다.
+    <span id="b-tomap-wrap">같은 조건을 지도로 보려면
+    <a href="#" id="b-tomap" style="color:var(--accent)">입체 지도 탭</a>으로 간다.</span></p>
+  <div class="budget-form">
+    <label>예산 <input type="number" id="b-budget" step="5000" min="1000"> 만원
+      <span class="muted" id="b-budget-eok"></span></label>
+    <label>전용 <input type="number" id="b-area" step="1" min="10"> ㎡ 이상</label>
+    <label>지역 <input type="search" id="b-region" placeholder="전체 (예: 성남)"></label>
+  </div>
+  <p class="sub" id="b-summary" style="margin:12px 0"></p>
+  <div class="scroll"><table class="rh">
+    <thead><tr>
+      <th style="cursor:default">지역</th><th style="cursor:default">단지</th>
+      <th style="cursor:default">전용</th><th style="cursor:default">준공</th>
+      <th style="cursor:default">시세(중위)</th><th style="cursor:default">거래범위</th>
+      <th style="cursor:default">평당가</th><th style="cursor:default">거래</th>
+    </tr></thead>
+    <tbody id="b-body"></tbody>
+  </table></div>
+  <p class="sub" id="b-note" style="margin-top:10px"></p>
+</section>
+
+</div><!-- /pane-overview -->
+
+<!-- ===================== 입체 지도 ===================== -->
+<div id="pane-map" hidden>
+
+<section class="card" id="map-card">
+  <div class="table-head" style="margin-bottom:10px">
+    <h2 style="margin:0">수도권 입체 지도</h2>
+    <div class="seg" id="map-metric"></div>
+  </div>
+
+  <div class="mapctl">
+    <label>회전 <input type="range" id="m-rot" min="-180" max="180" step="1"></label>
+    <label>기울기 <input type="range" id="m-tilt" min="14" max="80" step="1"></label>
+    <label>높이 <input type="range" id="m-exag" min="30" max="260" step="5"></label>
+    <label id="m-labelwrap"><input type="checkbox" id="m-labels"> 지역명</label>
+    <button class="ghost" id="m-reset">시점 초기화</button>
+  </div>
+
+  <div class="mapctl" id="m-budgetctl" style="display:none">
+    <label>예산 <input type="number" id="mb-budget" step="5000" min="1000"
+      style="width:104px;text-align:right;background:var(--panel-2);border:1px solid var(--line);
+      color:var(--text);border-radius:8px;padding:6px 10px;font:inherit;font-size:13px"> 만원</label>
+    <label>전용 <input type="number" id="mb-area" step="1" min="10"
+      style="width:78px;text-align:right;background:var(--panel-2);border:1px solid var(--line);
+      color:var(--text);border-radius:8px;padding:6px 10px;font:inherit;font-size:13px"> ㎡ 이상</label>
+    <span class="muted" id="mb-note"></span>
+  </div>
+
+  <div class="mapctl" id="m-playctl">
+    <button class="ghost" id="m-play">▶ 재생</button>
+    <input type="range" id="m-month" min="0" max="0" step="1" style="width:230px">
+    <span class="month-pill" id="m-monthlabel">전체 기간</span>
+    <button class="ghost" id="m-allmonths">전체 기간으로</button>
+  </div>
+
+  <div class="mapgrid">
+    <div>
+      <div class="stage" id="stage">
+        <div id="map"></div>
+        <div class="tip" id="maptip"></div>
+      </div>
+      <div class="mapfoot">
+        <span id="m-lo"></span>
+        <div class="rampbar" id="m-ramp"></div>
+        <span id="m-hi"></span>
+        <span class="muted" id="m-hint">끌어서 돌리고, 기둥을 눌러 고정한다</span>
+      </div>
+    </div>
+    <div>
+      <div class="sub" style="margin-bottom:8px" id="m-ranktitle"></div>
+      <div class="ranklist" id="m-ranklist"></div>
+    </div>
+  </div>
+
+  <p class="sub" style="margin-top:14px" id="m-caveat"></p>
+</section>
+
+<section class="card" id="m-detail-card">
+  <div class="table-head" style="margin-bottom:6px">
+    <h2 style="margin:0" id="m-dtitle">지역 상세</h2>
+    <div class="filters" style="margin:0" id="m-dmembers"></div>
+  </div>
+  <p class="sub" id="m-dsub" style="margin:0 0 12px"></p>
+  <div id="m-dchart"></div>
+</section>
+
+</div><!-- /pane-map -->
+
 <footer>
   <div><b>출처</b> 국토교통부 아파트 매매 실거래가 (data.go.kr, RTMSDataSvcAptTrade)</div>
   <ul>
@@ -264,14 +403,18 @@ footer ul{padding-left:18px;margin:8px 0 0}
         급감한 것처럼 보이기 때문이다.</li>
     <li>전용면적이 없는 건은 거래량에는 포함하되 단가 계산에서는 제외했다.</li>
     <li id="yoy-note"></li>
+    <li id="geo-note" hidden></li>
   </ul>
   <div style="margin-top:10px" id="gen"></div>
 </footer>
 
 </div>
 <script id="data" type="application/json">__DATA__</script>
+<script id="geo" type="application/json">__GEO__</script>
 <script>
 const D = JSON.parse(document.getElementById('data').textContent);
+const GEO = (() => { const el = document.getElementById('geo');
+  const t = el ? el.textContent.trim() : ''; return t ? JSON.parse(t) : null; })();
 const $ = s => document.querySelector(s);
 
 /* ---------- 표시 형식 ---------- */
@@ -288,13 +431,18 @@ function pct(v){
   return `<span class="${cls}">${sign}${v.toFixed(1)}%</span>`;
 }
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const shortName = s => String(s).replace('특별시','').replace('광역시','').replace('경기도 ','');
 
 /* ---------- 상태 ---------- */
+let tab = 'overview';
 let sido = 'ALL';
 let sortKey = 'median_ppp', sortDir = -1;
 let query = '';
 let dealType = 'all';          // 'all' | 'broker' (직거래 제외)
 let rhTab = 'highs';           // 'highs' | 'lows'
+// 예산 조건은 개요의 "예산으로 찾기"와 지도의 "예산 도달률"이 함께 쓴다.
+// 두 화면이 서로 다른 예산을 보고 있으면 같은 질문에 다른 답이 나온다.
+const BST = {budget: 80000, area: 84};
 
 // 전체본과 중개거래본은 같은 모양이라 뷰만 갈아끼운다.
 function V(){ return (dealType === 'broker' && D.broker) ? D.broker : D; }
@@ -320,6 +468,18 @@ function regionsFor(s){
 function change(cur, prev){
   if (prev == null || !prev || cur == null) return null;
   return (cur - prev) / prev * 100;
+}
+
+/* ---------- 탭 ---------- */
+function switchTab(name){
+  if (name === 'map' && !GEO) return;
+  tab = name;
+  $('#tabs').querySelectorAll('.tab').forEach(b =>
+    b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+  $('#pane-overview').hidden = name !== 'overview';
+  if ($('#pane-map')) $('#pane-map').hidden = name !== 'map';
+  // 지도는 숨겨진 동안 그려도 소용없다. 보이는 시점에 그린다.
+  if (name === 'map') renderMap();
 }
 
 /* ---------- 필터 ---------- */
@@ -596,19 +756,24 @@ function renderRecordHighs(){
 
 // analytics 는 지역명만 실어서 코드가 필요할 때 역인덱스를 쓴다.
 const REGION_CODE = Object.fromEntries((D.regions || []).map(r => [r.region, r.lawd_cd]));
+const REGION_BY_CODE = Object.fromEntries((D.regions || []).map(r => [r.lawd_cd, r]));
 function lawdOf(region){ return REGION_CODE[region] || ''; }
 
 /* ---------- 예산으로 찾기 ---------- */
 // price_index 는 키 이름을 뺀 배열로 실려 온다(13,000행에 키를 매번 실으면 3MB).
 const PI = D.price_index;
 const PIC = PI ? Object.fromEntries(PI.columns.map((c,i) => [c,i])) : {};
+const PI_BY_LAWD = (() => {
+  const m = {};
+  if (PI) for (const r of PI.rows) (m[r[PIC.lawd_cd]] ||= []).push(r);
+  return m;
+})();
 
 function renderBudget(){
   if (!PI || !PI.rows.length) return;
   $('#budget-card').style.display = '';
 
-  const budget = +$('#b-budget').value || 0;
-  const minArea = +$('#b-area').value || 0;
+  const budget = BST.budget, minArea = BST.area;
   const q = $('#b-region').value.trim();
   $('#b-budget-eok').textContent = budget ? `(${(budget/10000).toFixed(1)}억)` : '';
 
@@ -642,6 +807,18 @@ function renderBudget(){
     `${PI.window[0]}~${PI.window[PI.window.length-1]} 중개거래 ${PI.min_deals}건 이상인 `
     + `단지×전용타입 ${nf(PI.rows.length)}개가 대상이다. 전용면적이 넓은 순으로 상위 100개만 표시한다. `
     + `시세는 그 기간 중위 거래가이므로 호가가 아니다.`;
+}
+
+// 개요의 입력칸과 지도의 입력칸이 같은 값을 가리키게 묶는다.
+function syncBudgetInputs(from){
+  const pairs = [['#b-budget','#mb-budget','budget'], ['#b-area','#mb-area','area']];
+  for (const [a, b, key] of pairs){
+    const src = from === 'map' ? b : a, dst = from === 'map' ? a : b;
+    const el = $(src); if (!el) continue;
+    const v = +el.value;
+    if (v > 0) BST[key] = v;
+    if ($(dst)) $(dst).value = BST[key];
+  }
 }
 
 /* ---------- 층별 프리미엄 ---------- */
@@ -685,7 +862,7 @@ function renderJeonse(){
   const rows = [...j.regions].sort((a,b) => b.jeonse_ratio_pct - a.jeonse_ratio_pct);
   const max = Math.max(...rows.map(r => r.jeonse_ratio_pct), 1);
   $('#jeonse').innerHTML = rows.map(r => `<div class="dist-row">
-      <div style="font-size:12.5px">${esc(r.region.replace('특별시','').replace('광역시','').replace('경기도 ',''))}</div>
+      <div style="font-size:12.5px">${esc(shortName(r.region))}</div>
       <div class="track"><div class="fill" style="width:${(r.jeonse_ratio_pct/max*100).toFixed(1)}%"></div></div>
       <div class="dist-val"><b style="color:var(--text)">${r.jeonse_ratio_pct}%</b>
         · 단지 ${nf(r.matched_complexes)}개</div>
@@ -712,6 +889,599 @@ function renderDealType(){
         <b style="color:var(--text)">${dt.direct_vs_broker_pct}%</b></p>`);
 }
 
+/* ================================================================
+   입체 지도
+
+   외부 라이브러리 없이 축측투영(axonometric)으로 직접 그린다. 시군구 경계를
+   밑면으로 두고 지표값만큼 기둥을 세운 뒤, 카메라에서 보이는 옆면만 골라
+   명암을 넣는다. 순서는 화가 알고리즘 — 먼 셀부터 그려서 가까운 셀이 덮게 한다.
+   ================================================================ */
+const MAP = {
+  metric: 'median_ppp',
+  rot: -20, tilt: 47, exag: 1.0,
+  month: null,          // null = 전체 기간, 아니면 월 인덱스
+  playing: false, timer: null,
+  sel: null,            // 고정한 셀
+  labels: false,
+  geom: null,
+};
+const MAP_DEFAULT = {rot: -20, tilt: 47, exag: 1.0};
+
+const METRICS = {
+  median_ppp: {label:'중위 평당가', unit:'만원/평', kind:'seq', monthly:'ppp',
+               fmt:v => nf(Math.round(v))},
+  count:      {label:'거래건수', unit:'건', kind:'seq', monthly:'count',
+               fmt:v => nf(Math.round(v))},
+  mom_ppp_pct:{label:'전월비 평당가', unit:'%', kind:'div', monthly:null,
+               fmt:v => (v>0?'+':'') + v.toFixed(1)},
+  budget:     {label:'예산 도달률', unit:'%', kind:'seq', monthly:null,
+               fmt:v => v.toFixed(1)},
+};
+// 낮은 값 -> 높은 값. 남색에서 시작해 마지막에 산호색으로 튄다. 시작을 너무 어둡게
+// 잡으면 값이 하위에 몰린 경기 외곽이 전부 같은 색으로 뭉개진다.
+const RAMP_SEQ = ['#20428f','#2160c2','#1b8fbe','#1eab8f','#8cc44f','#f3c53c','#f2803a','#df3d4d'];
+// 발산형(전월비)은 가운데가 중립이어야 한다. 0 근처가 회색이 되도록 잡는다.
+const RAMP_DIV = ['#2f74c8','#5f9fd8','#93b8cf','#69748c','#d9a08c','#e06a4c','#cf2f36'];
+// 값이 없거나 필터에서 빠진 셀의 색. 다크에서 쓰던 남회색을 라이트 배경에 그대로 쓰면
+// 흐려지기는커녕 제일 무겁게 보인다. 테마에 맞춰 뒤로 물러나는 쪽으로 잡는다.
+const noval = () => document.documentElement.dataset.theme === 'light' ? '#c6d0e0' : '#3a4560';
+const LIGHT = [-0.56, -0.83];      // 화면 왼쪽 앞에서 오는 빛
+
+function hex2rgb(h){ const n = parseInt(h.slice(1), 16);
+  return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+function rgb2hex(c){ return '#' + c.map(v =>
+  Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2,'0')).join(''); }
+function mixHex(a, b, t){ const A = hex2rgb(a), B = hex2rgb(b);
+  return rgb2hex([0,1,2].map(i => A[i] + (B[i]-A[i]) * t)); }
+function rampAt(ramp, t){
+  t = Math.max(0, Math.min(1, t || 0));
+  const x = t * (ramp.length - 1), i = Math.floor(x);
+  return i >= ramp.length - 1 ? ramp[ramp.length-1] : mixHex(ramp[i], ramp[i+1], x - i);
+}
+function shade(hex, f){ return rgb2hex(hex2rgb(hex).map(v => v * f)); }
+function rampCss(ramp){
+  return `linear-gradient(90deg,${ramp.join(',')})`;
+}
+
+/* --- 셀 -> 시군구 코드들 --- */
+const CELL_MEMBERS = (() => {
+  const m = {};
+  if (GEO) for (const [lawd, cell] of Object.entries(GEO.cell_of)) (m[cell] ||= []).push(lawd);
+  return m;
+})();
+
+/* --- 값 계산 ---------------------------------------------------
+   병합 셀(옛 중구+동구 등)은 여러 시군구를 한 칸에 담는다. 중위값은 원자료 없이
+   합칠 수 없으므로 거래건수 가중평균으로 근사하고, 그 사실을 툴팁에 적는다.
+   거래건수는 단순 합, 예산 도달률은 분자·분모를 각각 합쳐 정확히 계산한다.       */
+function budgetShare(lawds){
+  if (!PI) return null;
+  let hit = 0, tot = 0;
+  for (const l of lawds){
+    const rows = PI_BY_LAWD[l] || [];
+    tot += rows.length;
+    for (const r of rows)
+      if (r[PIC.median_amount] <= BST.budget && r[PIC.area_type] >= BST.area) hit++;
+  }
+  return tot ? hit / tot * 100 : null;
+}
+
+// 시군구 코드 -> 랭킹 행. cellValue 가 한 프레임에 천 번 넘게 불려서 매번
+// 새로 만들면 회전이 눈에 띄게 끊긴다.
+let _byLawd = {key:null, map:null};
+function regionsByLawd(){
+  if (_byLawd.key !== dealType)
+    _byLawd = {key:dealType, map:Object.fromEntries(V().regions.map(r => [r.lawd_cd, r]))};
+  return _byLawd.map;
+}
+
+function cellValue(cell, key, mi){
+  const lawds = CELL_MEMBERS[cell] || [];
+  if (!lawds.length) return null;
+  if (key === 'budget') return budgetShare(lawds);
+
+  const v = V();
+  if (mi != null && METRICS[key].monthly){
+    const rm = v.region_monthly || D.region_monthly;
+    if (!rm) return null;
+    if (key === 'count'){
+      let s = 0, seen = false;
+      for (const l of lawds){ const e = rm.regions[l]; if (!e) continue; seen = true; s += e.count[mi] || 0; }
+      return seen ? s : null;
+    }
+    let num = 0, den = 0;
+    for (const l of lawds){
+      const e = rm.regions[l]; if (!e) continue;
+      const val = e.ppp[mi], w = e.count[mi];
+      if (val == null || !w) continue;
+      num += val * w; den += w;
+    }
+    return den ? num / den : null;
+  }
+
+  const by = regionsByLawd();
+  if (key === 'count'){
+    let s = 0, seen = false;
+    for (const l of lawds){ const r = by[l]; if (!r) continue; seen = true; s += r.count || 0; }
+    return seen ? s : null;
+  }
+  let num = 0, den = 0;
+  for (const l of lawds){
+    const r = by[l]; if (!r) continue;
+    const val = r[key], w = (key === 'mom_ppp_pct' ? r.ref_count : r.count) || 0;
+    if (val == null || !w) continue;
+    num += val * w; den += w;
+  }
+  return den ? num / den : null;
+}
+
+function mapDomain(key){
+  // 재생 중에 색이 매달 다시 잡히면 아무것도 변하지 않는 것처럼 보인다.
+  // 전체 기간과 모든 달을 한꺼번에 넣어 눈금을 한 번만 정한다.
+  const met = METRICS[key], cells = Object.keys(GEO.cells);
+  const vals = [];
+  const push = mi => { for (const c of cells){ const v = cellValue(c, key, mi); if (v != null) vals.push(v); } };
+  push(null);
+  if (met.monthly) (D.region_monthly?.months || []).forEach((_, i) => push(i));
+  if (!vals.length) return {lo:0, hi:1, ramp:RAMP_SEQ, kind:'seq', norm:() => 0, height:() => 0};
+
+  if (met.kind === 'div'){
+    const m = Math.max(...vals.map(Math.abs), 0.1);
+    return {lo:-m, hi:m, ramp:RAMP_DIV, kind:'div',
+            norm:v => 0.5 + 0.5 * v / m,
+            height:v => 0.05 + 0.95 * Math.abs(v) / m};
+  }
+  const lo = Math.min(...vals), hi = Math.max(...vals), span = (hi - lo) || 1;
+  return {lo, hi, ramp:RAMP_SEQ, kind:'seq',
+          norm:v => (v - lo) / span,
+          height:v => 0.05 + 0.95 * (v - lo) / span};
+}
+
+// 눈금 계산은 78개 셀 × 16개 월을 훑는다. 시점을 끌 때마다 다시 하면 회전이 끊기고,
+// 애초에 시점이 바뀐다고 눈금이 달라지지도 않는다.
+let _dom = {k:null, v:null};
+function domainFor(key){
+  const k = [key, dealType, BST.budget, BST.area].join('|');
+  if (_dom.k !== k) _dom = {k, v: mapDomain(key)};
+  return _dom.v;
+}
+
+function mapLabelText(name){
+  const s = String(name).split('(')[0].trim()
+    .replace(/^(서울특별시|인천광역시|경기도)\s*/, '');
+  const w = s.split(' '), last = w[w.length-1];
+  // "수원시 장안구" 는 구 이름만, "화성시 4개 구" 는 통째로 쓴다.
+  return (w.length > 1 && last.length >= 2 && /[구시군]$/.test(last)) ? last : s;
+}
+
+/* --- 기하 준비(한 번만) --- */
+function prepGeom(){
+  if (MAP.geom || !GEO) return MAP.geom;
+  const KX = Math.cos(37.5 * Math.PI / 180);   // 위도 37.5°에서 경도 1°는 위도 1°의 0.79배
+  const raw = [];
+  for (const [cell, rings] of Object.entries(GEO.cells))
+    for (const r of rings){
+      let sx = 0, sy = 0;
+      for (const p of r){ sx += p[0]; sy += p[1]; }
+      raw.push({cell, pts:r, cx:sx/r.length, cy:sy/r.length});
+    }
+  // 옹진군의 서해 먼바다 섬(백령·연평)은 본토에서 150km 넘게 떨어져 있다. 함께 그리면
+  // 화면의 3분의 1이 빈 바다가 되고 수도권 본토가 그만큼 작아진다. 아예 빼고 그 사실을
+  // 화면에 적는다 — 시야만 좁히면 잘린 섬이 프레임 가장자리에 걸려 더 이상하다.
+  const med = a => { const s = [...a].sort((x,y) => x-y); return s[s.length >> 1]; };
+  const mx = med(raw.map(r => r.cx)), my = med(raw.map(r => r.cy));
+  const core = raw.filter(r => Math.abs(r.cx-mx) < 1.2 && Math.abs(r.cy-my) < 1.2);
+  const outside = raw.length - core.length;
+  let lo0=1e9, hi0=-1e9, lo1=1e9, hi1=-1e9;
+  for (const r of core) for (const p of r.pts){
+    if (p[0]<lo0) lo0=p[0]; if (p[0]>hi0) hi0=p[0];
+    if (p[1]<lo1) lo1=p[1]; if (p[1]>hi1) hi1=p[1];
+  }
+  const cx = (lo0+hi0)/2, cy = (lo1+hi1)/2;
+  const toWorld = p => [(p[0]-cx)*KX, p[1]-cy];
+
+  const byCell = {};
+  for (const r of core){
+    let pts = r.pts.map(toWorld);
+    // 감김 방향을 반시계로 통일한다. 옆면의 앞뒤 판정이 이 방향에 걸려 있다.
+    let a2 = 0;
+    for (let i = 0; i < pts.length; i++){
+      const p = pts[i], q = pts[(i+1) % pts.length];
+      a2 += p[0]*q[1] - q[0]*p[1];
+    }
+    if (a2 < 0) pts.reverse();
+    (byCell[r.cell] ||= []).push(pts);
+  }
+  const cells = Object.entries(byCell).map(([cell, rings]) => {
+    let sx = 0, sy = 0, n = 0;
+    // 대표점은 가장 큰 링 기준이다. 작은 섬들이 중심을 바다로 끌고 가면
+    // 라벨과 앞뒤 정렬이 어긋난다.
+    const main = rings.reduce((a,b) => a.length >= b.length ? a : b);
+    for (const p of main){ sx += p[0]; sy += p[1]; n++; }
+    return {cell, rings, cx:sx/n, cy:sy/n};
+  });
+  const span = Math.max((hi0-lo0)*KX, hi1-lo1);
+  MAP.geom = {cells, span, outside};
+  return MAP.geom;
+}
+
+/* --- 렌더 ---
+   quick=true 면 SVG 만 다시 그린다. 시점을 끄는 동안에는 범례·순위·주석이 바뀌지
+   않는데, 매 프레임 다시 만들면 그것만으로 프레임이 밀린다. */
+function renderMap(quick){
+  if (!GEO) return;
+  const g = prepGeom();
+  const key = MAP.metric, met = METRICS[key], dom = domainFor(key);
+  const mi = MAP.month;
+
+  const W = 980, H = 580;
+  const a = MAP.rot * Math.PI/180, t = MAP.tilt * Math.PI/180;
+  const ca = Math.cos(a), sa = Math.sin(a), st = Math.sin(t), ct = Math.cos(t);
+
+  const activeSido = sido;
+  const sidoOf = cell => {
+    const l = (CELL_MEMBERS[cell] || [])[0];
+    return l && REGION_BY_CODE[l] ? REGION_BY_CODE[l].sido : null;
+  };
+
+  // 1) 기둥 높이를 먼저 정한다. 화면 맞춤이 높이에 걸려 있어서다.
+  const hMax = g.span * 0.42 * MAP.exag;
+  const dull = noval();
+  const info = g.cells.map(c => {
+    const v = cellValue(c.cell, key, mi);
+    const inSido = activeSido === 'ALL' || sidoOf(c.cell) === activeSido;
+    const col = v == null ? dull : rampAt(dom.ramp, dom.norm(v));
+    return {c, v, inSido,
+            base: inSido ? col : mixHex(col, dull, 0.8),
+            h: (v == null ? 0.02 : dom.height(v)) * hMax * (inSido ? 1 : 0.12)};
+  });
+
+  // 2) 밑면과 윗면을 모두 넣어 실제 차지하는 넓이를 잰다. 밑면만 재고 "가장 높은
+  //    기둥만큼" 여백을 잡으면, 그 높이에 닿는 셀이 하나뿐이라 화면의 절반이 빈다.
+  let x0=1e9, x1=-1e9, y0=1e9, y1=-1e9;
+  for (const {c, h} of info) for (const r of c.rings) for (const p of r){
+    const Xr = p[0]*ca - p[1]*sa, Yr = p[0]*sa + p[1]*ca;
+    const yb = -(Yr*st), yt = yb - h*ct;
+    if (Xr<x0) x0=Xr; if (Xr>x1) x1=Xr;
+    if (yt<y0) y0=yt; if (yb>y1) y1=yb;
+  }
+  const spanX = (x1-x0) || 1, spanY = (y1-y0) || 1;
+  const s = Math.min((W-40)/spanX, (H-40)/spanY);
+  const ox = (W - spanX*s)/2 - x0*s;
+  const oy = (H - spanY*s)/2 - y0*s;
+  const P = (X, Y, Z) => {
+    const Xr = X*ca - Y*sa, Yr = X*sa + Y*ca;
+    return (ox + Xr*s).toFixed(1) + ',' + (oy - (Yr*st + Z*ct)*s).toFixed(1);
+  };
+
+  // 3) 먼 셀부터. 카메라는 -Yr 쪽에 있으므로 Yr 이 큰 셀이 멀다.
+  const order = info.map((d, i) => ({i, Yr: d.c.cx*sa + d.c.cy*ca}))
+                    .sort((p, q) => q.Yr - p.Yr);
+
+  let out = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="수도권 시군구 입체 지도">`;
+  // 밑면 윤곽을 먼저 한 겹 깔면 기둥이 바닥에 붙어 보인다.
+  let plate = '';
+  for (const c of g.cells)
+    for (const r of c.rings) plate += 'M' + r.map(p => P(p[0],p[1],0)).join('L') + 'Z';
+  out += `<path class="plate" d="${plate}"/>`;
+
+  const labels = [];
+  const BUCKETS = 12;   // 옆면 명암 단계. 벽 하나당 path 를 만들면 2천 개가 넘는다.
+  for (const {i} of order){
+    const {c, v, inSido, base, h} = info[i];
+    const buckets = new Map();
+    for (const ring of c.rings){
+      const n = ring.length;
+      for (let k = 0; k < n; k++){
+        const p = ring[k], q = ring[(k+1) % n];
+        const pXr = p[0]*ca - p[1]*sa, qXr = q[0]*ca - q[1]*sa;
+        // 반시계 링에서 바깥 법선이 카메라를 향하는 옆면은 dx>0 인 변이다.
+        const dx = qXr - pXr;
+        if (dx <= 0) continue;
+        const dy = (q[0]*sa + q[1]*ca) - (p[0]*sa + p[1]*ca);
+        const L = Math.hypot(dx, dy) || 1;
+        const lam = Math.max(0.30, Math.min(1.0,
+          0.50 + 0.38 * ((dy/L)*LIGHT[0] + (-dx/L)*LIGHT[1])));
+        const b = Math.round(lam * BUCKETS);
+        const seg = `M${P(p[0],p[1],0)}L${P(q[0],q[1],0)}L${P(q[0],q[1],h)}L${P(p[0],p[1],h)}Z`;
+        buckets.set(b, (buckets.get(b) || '') + seg);
+      }
+    }
+    let body = '';
+    for (const [b, d] of buckets) body += `<path d="${d}" fill="${shade(base, b/BUCKETS)}"/>`;
+    const top = c.rings.map(r => 'M' + r.map(p => P(p[0],p[1],h)).join('L') + 'Z').join('');
+    body += `<path d="${top}" fill="${base}" stroke="${shade(base, 1.45)}" stroke-width=".8"/>`;
+    const sel = MAP.sel === c.cell ? ' class="sel"' : '';
+    out += `<g data-cell="${esc(c.cell)}"${sel}>${body}</g>`;
+    if (MAP.labels && inSido && v != null){
+      const [lx, ly] = P(c.cx, c.cy, h).split(',');
+      labels.push({x:+lx, y:+ly - 5, v, text: mapLabelText(GEO.labels[c.cell] || c.cell)});
+    }
+  }
+  // 라벨은 기둥에 가리면 못 읽으니 맨 위에 한 겹으로 올린다. 서울 도심은 구가 다닥다닥
+  // 붙어 있어 전부 찍으면 글자가 겹쳐 아무것도 안 읽힌다. 값이 큰 곳부터 자리를
+  // 잡고, 이미 놓인 라벨과 겹치는 것은 버린다.
+  labels.sort((a, b) => b.v - a.v);
+  const placed = [];
+  for (const L of labels){
+    if (placed.some(q => Math.abs(q.x - L.x) < 42 && Math.abs(q.y - L.y) < 13)) continue;
+    placed.push(L);
+    out += `<text class="maplabel" x="${L.x.toFixed(1)}" y="${L.y.toFixed(1)}" `
+         + `text-anchor="middle">${esc(L.text)}</text>`;
+  }
+  out += '</svg>';
+  $('#map').innerHTML = out;
+  if (quick) return;
+
+  // 범례 / 눈금
+  $('#m-ramp').style.background = rampCss(dom.ramp);
+  $('#m-lo').textContent = met.fmt(dom.lo) + met.unit;
+  $('#m-hi').textContent = met.fmt(dom.hi) + met.unit;
+  renderMapRank(dom);
+  renderMapCaveat();
+}
+
+function renderMapCaveat(){
+  const g = MAP.geom;
+  const note = GEO.note ? GEO.note + ' ' : '';
+  $('#m-caveat').innerHTML = esc(note)
+    + `기둥 높이와 색은 모두 <b>${METRICS[MAP.metric].label}</b>이다. `
+    + (MAP.metric === 'mom_ppp_pct'
+        ? `발산형 눈금이라 가운데가 0%이고, 높이는 변화의 크기(절대값)다. `
+        : '')
+    + `병합 셀(옛 중구+동구 등)의 중위값은 원자료 없이 합칠 수 없어 거래건수 가중평균으로 `
+    + `근사했다 — 기둥을 누르면 구성 시군구의 개별 값이 나온다. `
+    + (g && g.outside ? `옹진군의 서해 먼바다 섬 등 ${g.outside}개 링은 화면 밖이다. ` : '');
+}
+
+/* --- 오른쪽 순위 목록: 지도의 범례이자 목차 --- */
+function renderMapRank(dom){
+  const key = MAP.metric, met = METRICS[key], mi = MAP.month;
+  const rows = Object.keys(GEO.cells).map(cell => ({
+    cell, name: GEO.labels[cell] || cell, v: cellValue(cell, key, mi),
+  })).filter(r => r.v != null);
+  rows.sort((a,b) => b.v - a.v);
+  const maxAbs = Math.max(...rows.map(r => Math.abs(r.v)), 1e-9);
+  $('#m-ranktitle').innerHTML =
+    `<b style="color:var(--text)">${esc(met.label)}</b> 순위 · ${rows.length}개 셀`
+    + (mi == null ? '' : ` · ${esc(D.region_monthly.months[mi])}`);
+  $('#m-ranklist').innerHTML = rows.map(r => `
+    <div class="rankbar${MAP.sel===r.cell?' sel':''}" data-cell="${esc(r.cell)}">
+      <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+           title="${esc(r.name)}">${esc(shortName(r.name))}</div>
+      <div class="rt"><div class="rf" style="width:${(Math.abs(r.v)/maxAbs*100).toFixed(1)}%;
+        background:${rampAt(dom.ramp, dom.norm(r.v))}"></div></div>
+      <div class="rv">${met.fmt(r.v)}</div>
+    </div>`).join('');
+  $('#m-ranklist').querySelectorAll('.rankbar').forEach(el =>
+    el.onclick = () => selectCell(el.dataset.cell));
+}
+
+/* --- 선택한 셀의 월별 궤적 --- */
+function selectCell(cell){
+  MAP.sel = (MAP.sel === cell) ? null : cell;
+  renderMap();
+  renderMapDetail();
+  if (MAP.sel) $('#m-detail-card').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+let detailLawd = null;
+function renderMapDetail(){
+  const card = $('#m-detail-card');
+  if (!MAP.sel){
+    $('#m-dtitle').textContent = '지역 상세';
+    $('#m-dmembers').innerHTML = '';
+    $('#m-dsub').textContent = '지도에서 기둥을 누르거나 오른쪽 순위에서 지역을 고르면 그 지역의 월별 궤적이 여기에 나온다.';
+    $('#m-dchart').innerHTML = '';
+    return;
+  }
+  const lawds = CELL_MEMBERS[MAP.sel] || [];
+  if (!lawds.includes(detailLawd)) detailLawd = lawds[0];
+  $('#m-dtitle').textContent = GEO.labels[MAP.sel] || MAP.sel;
+  // 병합 셀은 어느 시군구의 궤적인지 골라야 한다. 합쳐서 그리면 두 지역의
+  // 서로 다른 움직임이 한 선으로 뭉개진다.
+  $('#m-dmembers').innerHTML = lawds.length < 2 ? '' : lawds.map(l =>
+    `<button class="chip" data-l="${esc(l)}" aria-pressed="${l===detailLawd}">`
+    + `${esc(shortName((REGION_BY_CODE[l]||{}).region || l))}</button>`).join('');
+  $('#m-dmembers').querySelectorAll('.chip').forEach(b =>
+    b.onclick = () => { detailLawd = b.dataset.l; renderMapDetail(); });
+
+  const r = REGION_BY_CODE[detailLawd];
+  const rm = (V().region_monthly || D.region_monthly);
+  const e = rm && rm.regions[detailLawd];
+  if (!r || !e){ $('#m-dsub').textContent = '이 지역의 거래 기록이 없다.'; $('#m-dchart').innerHTML = ''; return; }
+
+  $('#m-dsub').innerHTML =
+    `중위 평당가 <b style="color:var(--text)">${nf(r.median_ppp)}</b>만원/평 `
+    + `(수도권 ${r.rank}위) · 중위 거래가 <b style="color:var(--text)">${fmtAmount(r.median_amount)}</b> · `
+    + `거래 ${nf(r.count)}건 · 전월비 평당가 ${pct(r.mom_ppp_pct)} · `
+    + `25~75% ${nf(r.p25_ppp)}~${nf(r.p75_ppp)}만원`;
+
+  const months = rm.months, prov = new Set(D.meta.provisional_months || []);
+  const W = 860, H = 250, ml = 52, mr = 56, mt = 14, mb = 40;
+  const iw = W-ml-mr, ih = H-mt-mb, bw = iw/months.length;
+  const maxC = Math.max(...e.count, 1);
+  const vals = e.ppp.filter(v => v != null);
+  const pMax = vals.length ? Math.max(...vals) : 1, pMin = vals.length ? Math.min(...vals) : 0;
+  const pad = Math.max((pMax-pMin)*0.35, pMax*0.03);
+  const pLo = Math.max(0, pMin-pad), pHi = pMax+pad;
+  const x = i => ml + bw*i + bw*0.5;
+  const yC = v => mt + ih - (v/maxC)*ih;
+  const yP = v => mt + ih - ((v-pLo)/((pHi-pLo)||1))*ih;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}">`;
+  for (let k = 0; k <= 4; k++){
+    const y = mt + ih - ih*k/4;
+    svg += `<line class="gridline" x1="${ml}" y1="${y}" x2="${ml+iw}" y2="${y}"/>`
+        +  `<text class="axis-text" x="${ml-8}" y="${y+4}" text-anchor="end">${nf(Math.round(maxC*k/4))}</text>`
+        +  `<text class="axis-text" x="${ml+iw+8}" y="${y+4}">${nf(Math.round(pLo+(pHi-pLo)*k/4))}</text>`;
+  }
+  months.forEach((ym, i) => {
+    const h = ih - (yC(e.count[i]) - mt);
+    svg += `<rect class="bar${prov.has(ym)?' prov':''}" x="${ml+bw*i+bw*0.18}" y="${yC(e.count[i])}"`
+        +  ` width="${bw*0.64}" height="${Math.max(h,0)}" rx="3"><title>${ym} ${nf(e.count[i])}건</title></rect>`;
+  });
+  const pts = months.map((ym,i) => e.ppp[i] == null ? null : [x(i), yP(e.ppp[i])]).filter(Boolean);
+  if (pts.length > 1)
+    svg += `<path class="pline" d="${pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ')}"/>`;
+  months.forEach((ym,i) => { if (e.ppp[i] == null) return;
+    svg += `<circle class="pdot" cx="${x(i)}" cy="${yP(e.ppp[i])}" r="3.2">`
+        +  `<title>${ym} ${nf(e.ppp[i])}만원/평</title></circle>`; });
+  const step = months.length > 8 ? 2 : 1;
+  months.forEach((ym,i) => { if (i % step && i !== months.length-1) return;
+    svg += `<text class="axis-text" x="${x(i)}" y="${mt+ih+18}" text-anchor="middle">${ym.slice(2)}</text>`; });
+  svg += `<text class="axis-text" x="${ml}" y="${H-6}">건수</text>`
+      +  `<text class="axis-text" x="${ml+iw}" y="${H-6}" text-anchor="end">만원/평</text></svg>`;
+  $('#m-dchart').innerHTML = svg
+    + `<p class="sub" style="margin-top:10px">월별 중위 평당가는 표본이 `
+    + `${rm.min_samples}건 미만인 달을 비운다. 두세 건짜리 중위값이 시장 변화처럼 보이면 안 된다.</p>`;
+}
+
+/* --- 컨트롤 --- */
+function setupMap(){
+  // 경계 파일 없이도 나머지 대시보드는 그대로 돌아야 한다. 빈 탭을 남기는 대신 숨긴다.
+  if (!GEO){
+    const b = $('#tabs .tab[data-tab="map"]');
+    if (b) b.hidden = true;
+    $('#pane-map').remove();
+    return;
+  }
+  $('#map-metric').innerHTML = Object.entries(METRICS).map(([k, m]) =>
+    `<button data-m="${k}" aria-pressed="${k===MAP.metric}">${esc(m.label)}</button>`).join('');
+  $('#map-metric').querySelectorAll('button').forEach(b => b.onclick = () => {
+    MAP.metric = b.dataset.m;
+    if (!METRICS[MAP.metric].monthly) MAP.month = null;
+    stopPlay(); syncMapControls(); renderMap();
+  });
+
+  const months = (D.region_monthly || {}).months || [];
+  $('#m-month').max = String(Math.max(months.length - 1, 0));
+  $('#m-month').value = String(Math.max(months.length - 1, 0));
+
+  // 시점만 바꾸는 조작은 SVG 만 다시 그린다(범례·순위는 그대로다).
+  const bind = (sel, key) => $(sel).oninput = e => { MAP[key] = +e.target.value; renderMap(true); };
+  bind('#m-rot', 'rot'); bind('#m-tilt', 'tilt');
+  $('#m-exag').oninput = e => { MAP.exag = +e.target.value/100; renderMap(true); };
+  $('#m-labels').onchange = e => { MAP.labels = e.target.checked; renderMap(true); };
+  $('#m-reset').onclick = () => { Object.assign(MAP, MAP_DEFAULT); syncMapControls(); renderMap(true); };
+
+  $('#m-month').oninput = e => { MAP.month = +e.target.value; syncMapControls(); renderMap(); };
+  $('#m-allmonths').onclick = () => { stopPlay(); MAP.month = null; syncMapControls(); renderMap(); };
+  $('#m-play').onclick = () => MAP.playing ? stopPlay() : startPlay();
+
+  ['#mb-budget','#mb-area'].forEach(s => $(s).oninput = () => {
+    syncBudgetInputs('map'); renderBudget(); if (MAP.metric === 'budget') renderMap(); });
+
+  // 끌어서 시점 변경. 가로는 방위각, 세로는 카메라 고도.
+  const stage = $('#stage');
+  let drag = null;
+  stage.addEventListener('pointerdown', e => {
+    // 포인터를 캡처하면 이후 이벤트의 target 이 stage 가 되어 어느 기둥을 눌렀는지
+    // 알 수 없다. 누른 순간에 미리 집어둔다.
+    const g = e.target.closest && e.target.closest('g[data-cell]');
+    drag = {x:e.clientX, y:e.clientY, rot:MAP.rot, tilt:MAP.tilt, moved:0,
+            cell: g ? g.dataset.cell : null};
+    $('#maptip').style.opacity = 0;
+    stage.classList.add('drag'); stage.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener('pointermove', e => {
+    if (!drag){ hoverMap(e); return; }
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.moved = Math.max(drag.moved, Math.abs(dx) + Math.abs(dy));
+    MAP.rot = ((drag.rot + dx*0.4 + 180) % 360 + 360) % 360 - 180;
+    MAP.tilt = Math.max(14, Math.min(80, drag.tilt + dy*0.25));
+    syncMapControls(); renderMap(true);
+  });
+  const end = () => {
+    if (!drag) return;
+    // 끌고 나서 손을 떼는 것은 선택이 아니다. 5px 미만만 클릭으로 본다.
+    if (drag.moved < 5 && drag.cell) selectCell(drag.cell);
+    stage.classList.remove('drag'); drag = null;
+  };
+  stage.addEventListener('pointerup', end);
+  stage.addEventListener('pointercancel', end);
+  stage.addEventListener('pointerleave', () => { $('#maptip').style.opacity = 0; });
+
+  syncMapControls();
+  renderMapDetail();
+}
+
+function syncMapControls(){
+  $('#m-rot').value = String(Math.round(MAP.rot));
+  $('#m-tilt').value = String(Math.round(MAP.tilt));
+  $('#m-exag').value = String(Math.round(MAP.exag*100));
+  $('#m-labels').checked = MAP.labels;
+  $('#map-metric').querySelectorAll('button').forEach(b =>
+    b.setAttribute('aria-pressed', String(b.dataset.m === MAP.metric)));
+  const months = (D.region_monthly || {}).months || [];
+  const hasMonthly = !!METRICS[MAP.metric].monthly && months.length > 0;
+  $('#m-playctl').style.display = hasMonthly ? '' : 'none';
+  $('#m-budgetctl').style.display = MAP.metric === 'budget' ? '' : 'none';
+  $('#mb-note').textContent = PI
+    ? `${PI.window[0]}~${PI.window[PI.window.length-1]} 중개거래 기준 단지×전용타입 중 조건을 만족하는 비율`
+    : '시세 인덱스가 없어 계산할 수 없다';
+  // 전체 기간으로 돌아왔는데 슬라이더 손잡이가 중간에 남아 있으면 어느 쪽이 맞는지
+  // 알 수 없다. 끝으로 돌려 놓는다.
+  $('#m-month').value = String(MAP.month == null ? Math.max(months.length-1, 0) : MAP.month);
+  $('#m-monthlabel').textContent = MAP.month == null ? '전체 기간'
+    : months[MAP.month] + ((D.meta.provisional_months || []).includes(months[MAP.month]) ? ' (잠정)' : '');
+  $('#m-play').textContent = MAP.playing ? '⏸ 정지' : '▶ 재생';
+}
+
+function startPlay(){
+  const months = (D.region_monthly || {}).months || [];
+  if (!months.length || !METRICS[MAP.metric].monthly) return;
+  MAP.playing = true;
+  if (MAP.month == null) MAP.month = 0;
+  MAP.timer = setInterval(() => {
+    MAP.month = (MAP.month + 1) % months.length;
+    syncMapControls(); renderMap();
+  }, 780);
+  syncMapControls(); renderMap();
+}
+function stopPlay(){
+  MAP.playing = false;
+  if (MAP.timer){ clearInterval(MAP.timer); MAP.timer = null; }
+  syncMapControls();
+}
+
+function hoverMap(e){
+  const tip = $('#maptip');
+  const g = e.target.closest && e.target.closest('g[data-cell]');
+  if (!g){ tip.style.opacity = 0; return; }
+  const cell = g.dataset.cell, met = METRICS[MAP.metric];
+  const v = cellValue(cell, MAP.metric, MAP.month);
+  const lawds = CELL_MEMBERS[cell] || [];
+  // 병합 셀은 합친 값 하나만 보여주면 어느 쪽 이야기인지 알 수 없다. 구성 시군구를
+  // 낱개로 같이 적는다.
+  const parts = lawds.length < 2 ? '' :
+    `<div class="parts">${lawds.map(l => {
+      const one = oneRegionValue(l);
+      const r = REGION_BY_CODE[l] || {};
+      return `${esc(shortName(r.region || l))} ${one == null ? '–' : met.fmt(one)}`;
+    }).join(' · ')}</div>`;
+  tip.innerHTML = `<b>${esc(GEO.labels[cell] || cell)}</b><br>`
+    + `${esc(met.label)} <b>${v == null ? '–' : met.fmt(v)}</b>${esc(met.unit)}`
+    + (MAP.month == null ? '' : ` <span class="muted">(${esc((D.region_monthly.months||[])[MAP.month])})</span>`)
+    + parts;
+  const rect = $('#stage').getBoundingClientRect();
+  tip.style.transform =
+    `translate(${(e.clientX - rect.left)}px, ${(e.clientY - rect.top)}px) translate(-50%, -125%)`;
+  tip.style.opacity = 1;
+}
+
+// 병합 셀 툴팁에서 구성 시군구를 따로 보여줄 때 쓴다.
+function oneRegionValue(lawd){
+  if (MAP.metric === 'budget') return budgetShare([lawd]);
+  const rm = V().region_monthly || D.region_monthly;
+  if (MAP.month != null && METRICS[MAP.metric].monthly && rm && rm.regions[lawd]){
+    const e = rm.regions[lawd];
+    return MAP.metric === 'count' ? e.count[MAP.month] : e.ppp[MAP.month];
+  }
+  const r = REGION_BY_CODE[lawd];
+  return r ? r[MAP.metric] : null;
+}
+
 /* ---------- 헤더 / 푸터 ---------- */
 function renderMeta(){
   const m = D.meta;
@@ -731,6 +1501,12 @@ function renderMeta(){
     ? '전년 동월 대비는 기준월과 그 12개월 전을 비교한 값이다.'
     : `현재 ${D.monthly.length}개월치만 수집해 전년 동월 대비는 산출할 수 없다. `
       + '기준월(최신월-2)의 12개월 전까지 있어야 하므로 <code>--months 15</code> 이상이 필요하다.';
+  if (GEO){
+    const el = $('#geo-note');
+    el.hidden = false;
+    el.innerHTML = `<b>지도 경계</b> ${esc(GEO.license || '')} · ${esc(GEO.vintage || '')}년 기준. `
+      + esc(GEO.note || '');
+  }
   if (m.synthetic){
     $('#banner').innerHTML = `<div class="banner"><b>합성 샘플 데이터다.</b> `
       + `실제 실거래가가 아니라 화면 검증용으로 생성한 가짜 값이므로, `
@@ -751,23 +1527,42 @@ function initTheme(){
     document.documentElement.dataset.theme = next;
     localStorage.setItem('apt-theme', next);
     sync();
+    // 지도 색은 SVG 안에 값으로 박혀 있어 CSS 변수만 바뀌어서는 따라오지 않는다.
+    if (tab === 'map') renderMap();
   };
 }
 
-function renderAll(){ renderFilters(); renderKpi(); renderChart(); renderTable(); }
+function renderAll(){
+  renderFilters(); renderKpi(); renderChart(); renderTable();
+  if (tab === 'map') { renderMap(); renderMapDetail(); }
+}
 
 initTheme();
 renderMeta();
 renderDist();
 renderRecordHighs();
+$('#b-budget').value = BST.budget; $('#b-area').value = BST.area;
+if (GEO){ $('#mb-budget').value = BST.budget; $('#mb-area').value = BST.area; }
 renderBudget();
 renderFloorPremium();
 renderJeonse();
 renderDealType();
+setupMap();
 renderAll();
+
+$('#tabs').querySelectorAll('.tab').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
+if (GEO){
+  $('#b-tomap').onclick = e => { e.preventDefault(); MAP.metric = 'budget';
+    switchTab('map'); syncMapControls(); renderMap();
+    $('#map-card').scrollIntoView({behavior:'smooth', block:'start'}); };
+} else {
+  $('#b-tomap-wrap').hidden = true;
+}
 $('#csv').onclick = downloadCsv;
 $('#q').oninput = e => { query = e.target.value.trim(); renderTable(); };
-['#b-budget','#b-area','#b-region'].forEach(s => $(s).oninput = renderBudget);
+['#b-budget','#b-area'].forEach(s => $(s).oninput = () => {
+  syncBudgetInputs('overview'); renderBudget(); if (tab === 'map') renderMap(); });
+$('#b-region').oninput = renderBudget;
 window.addEventListener('resize', renderChart);
 </script>
 </body>
@@ -775,21 +1570,31 @@ window.addEventListener('resize', renderChart);
 """
 
 
-def render(analytics, out_path):
+def render(analytics, out_path, boundaries=None):
     synthetic = analytics["meta"].get("synthetic")
     heading = "수도권 아파트 실거래가 대시보드"
     title = ("[샘플] " if synthetic else "") + heading
+
     # </script> 가 데이터 안에 있으면 스크립트 태그가 조기에 닫힌다.
-    payload = json.dumps(analytics, ensure_ascii=False, separators=(",", ":")) \
-        .replace("</", "<\\/")
+    def embed(obj):
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
 
     html = (PAGE
             .replace("__TITLE__", title)
             .replace("__HEADING__", heading)
-            .replace("__DATA__", payload))
+            .replace("__GEO__", embed(boundaries) if boundaries else "")
+            .replace("__DATA__", embed(analytics)))
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
     return out_path
+
+
+def load_boundaries(path):
+    """경계 파일이 없으면 지도만 빠지고 나머지는 그대로 나온다."""
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def main():
@@ -798,11 +1603,13 @@ def main():
         raise SystemExit(1)
     src = sys.argv[1]
     dst = sys.argv[2] if len(sys.argv) > 2 else "live/index.html"
+    geo_path = sys.argv[3] if len(sys.argv) > 3 else "data/boundaries.json"
     with open(src, encoding="utf-8") as f:
         analytics = json.load(f)
-    render(analytics, dst)
-    import os
-    print(f"대시보드 생성 -> {dst} ({os.path.getsize(dst)/1024:.0f}KB)")
+    geo = load_boundaries(geo_path)
+    render(analytics, dst, boundaries=geo)
+    print(f"대시보드 생성 -> {dst} ({os.path.getsize(dst)/1024:.0f}KB)"
+          + ("" if geo else " · 경계 없음(지도 탭 비활성)"))
 
 
 if __name__ == "__main__":
