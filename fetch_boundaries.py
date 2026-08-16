@@ -37,17 +37,27 @@ SOURCES = [
     "kostat/2013/json/municipalities-geo-simple.json",
 ]
 
-# 2013 경계에 없는 신설 구 -> 그릴 때 쓸 옛 영역. 이름으로 맞춘다.
-# (2013 파일은 코드 체계가 우리와 다를 수 있어 이름 매칭을 함께 쓴다)
-NEW_TO_OLD = {
-    "28125": ["중구"], "28155": ["중구"],            # 제물포·영종 <- 옛 인천 중구
-    "28275": ["서구"], "28290": ["서구"],            # 서해·검단 <- 옛 인천 서구
-    "41591": ["화성시"], "41593": ["화성시"],
-    "41595": ["화성시"], "41597": ["화성시"],
-    "41192": ["부천시"], "41194": ["부천시"], "41196": ["부천시"],
-}
+# 실측(2013 KOSTAT): 코드 체계가 법정동코드와 다르다. 서울 11, 인천 23, 경기 31 이고
+# 시군구 이름은 경기도가 공백 없이 붙어 있다("수원시장안구"). 인천 미추홀구는 개칭 전
+# 이름인 "남구"로 실려 있다.
+KOSTAT_SIDO = {"서울특별시": "11", "인천광역시": "23", "경기도": "31"}
 
-SIDO_PREFIX = {"11": "서울특별시", "28": "인천광역시", "41": "경기도"}
+# 우리 이름 -> 2013 원본 이름. 개칭·신설로 어긋나는 것만 적는다.
+NAME_ALIAS = {"미추홀구": "남구"}
+
+# 2013 이후 신설돼 원본에 경계가 없는 구. 지도 셀은 2013 행정구역 단위로 두고
+# 우리 데이터를 그 셀로 합산한다. 없는 경계를 지어내지 않으면서 지도를 채우는 방법이다.
+#   제물포구·영종구  <- 옛 중구 + 동구
+#   서해구·검단구    <- 옛 서구
+#   화성 4개 구      <- 화성시
+MERGED_CELLS = {
+    "인천_옛중구동구": {"members": ["28125", "28155"], "old_names": ["중구", "동구"],
+                        "label": "제물포·영종구 (옛 중구+동구)"},
+    "인천_옛서구": {"members": ["28275", "28290"], "old_names": ["서구"],
+                    "label": "서해·검단구 (옛 서구)"},
+    "화성_전체": {"members": ["41591", "41593", "41595", "41597"], "old_names": ["화성시"],
+                  "label": "화성시 4개 구"},
+}
 
 
 def download(url, timeout=30):
@@ -120,47 +130,63 @@ def feature_code(props):
 
 
 def build(geo, tol, min_area_points=8):
-    """우리 83개 시군구 -> 외곽 링 목록. 코드로 먼저, 안 되면 이름으로 맞춘다."""
-    feats = geo.get("features", [])
-    by_code, by_name = {}, {}
-    for f in feats:
+    """2013 행정구역 셀 -> 외곽 링, 그리고 우리 시군구 -> 셀 대응표를 만든다.
+
+    신설 구는 경계가 없으므로 옛 모구 셀에 합산한다. 지도는 2013 단위로 그려지고
+    데이터는 우리 83개에서 그 단위로 모인다. 없는 경계를 지어내지 않는다.
+    """
+    by_key = {}
+    for f in geo.get("features", []):
         props = f.get("properties", {})
         code, name = feature_code(props), feature_name(props)
-        if code:
-            by_code.setdefault(code[:5], []).append(f)
-        if name:
-            by_name.setdefault(name, []).append(f)
+        if code[:2] in ("11", "23", "31") and name:
+            by_key.setdefault((code[:2], name.replace(" ", "")), []).append(f)
 
-    out, missing = {}, []
-    for lawd, sido, sgg in REGIONS:
-        feats_for = by_code.get(lawd)
-        if not feats_for:
-            # 신설 구는 옛 모구 영역으로 대체한다.
-            for old in NEW_TO_OLD.get(lawd, []):
-                feats_for = [f for f in by_name.get(old, [])
-                             if feature_code(f.get("properties", {})).startswith(lawd[:2])]
-                if feats_for:
-                    break
-        if not feats_for:
-            short = sgg.split()[-1]
-            feats_for = [f for f in by_name.get(short, [])
-                         if feature_code(f.get("properties", {})).startswith(lawd[:2])]
-        if not feats_for:
-            missing.append(f"{sido} {sgg}({lawd})")
-            continue
-
+    def rings_for(feats):
         rings = []
-        for f in feats_for:
+        for f in feats:
             for ring in rings_of(f.get("geometry")):
                 pts = [(round(x, 4), round(y, 4)) for x, y in ring]
                 s = simplify(pts, tol)
                 if len(s) >= min_area_points:
                     rings.append(s)
+        return rings
+
+    merged_member = {m: cell for cell, spec in MERGED_CELLS.items()
+                     for m in spec["members"]}
+    cells, cell_of, labels, missing = {}, {}, {}, []
+
+    # 1) 병합 셀부터 만든다.
+    for cell, spec in MERGED_CELLS.items():
+        prefix = KOSTAT_SIDO["인천광역시" if cell.startswith("인천") else "경기도"]
+        feats = [f for n in spec["old_names"] for f in by_key.get((prefix, n), [])]
+        rings = rings_for(feats)
         if rings:
-            out[lawd] = rings
+            cells[cell] = rings
+            labels[cell] = spec["label"]
+            for m in spec["members"]:
+                cell_of[m] = cell
         else:
+            missing.append(f"{spec['label']} (원본 {'/'.join(spec['old_names'])} 없음)")
+
+    # 2) 나머지는 이름으로 1:1 대응.
+    for lawd, sido, sgg in REGIONS:
+        if lawd in merged_member:
+            continue
+        short = sgg.replace(" ", "")
+        key = (KOSTAT_SIDO[sido], NAME_ALIAS.get(short, short))
+        feats = by_key.get(key)
+        if not feats:
+            missing.append(f"{sido} {sgg}({lawd})")
+            continue
+        rings = rings_for(feats)
+        if not rings:
             missing.append(f"{sido} {sgg}({lawd}) - 링 없음")
-    return out, missing
+            continue
+        cells[lawd] = rings
+        cell_of[lawd] = lawd
+        labels[lawd] = f"{sido} {sgg}"
+    return cells, cell_of, labels, missing
 
 
 def main():
@@ -196,8 +222,8 @@ def main():
         print(f"  총 {len(cand)}개")
         return
 
-    shapes, missing = build(geo, args.tol)
-    total_pts = sum(len(r) for rs in shapes.values() for r in rs)
+    cells, cell_of, labels, missing = build(geo, args.tol)
+    total_pts = sum(len(r) for rs in cells.values() for r in rs)
     payload = {
         "source": url,
         "license": "KOSTAT (southkorea/southkorea-maps) - free to share or remix",
@@ -205,14 +231,17 @@ def main():
         "note": ("2013년 행정구역 경계다. 그 뒤 신설된 인천 제물포·영종·서해·검단구와 "
                  "화성 4개 구는 옛 모구 영역에 합산해 표시한다."),
         "tolerance": args.tol,
-        "shapes": {k: [[list(p) for p in ring] for ring in v] for k, v in shapes.items()},
+        "cells": {k: [[list(p) for p in ring] for ring in v] for k, v in cells.items()},
+        "cell_of": cell_of,       # 우리 시군구 코드 -> 지도 셀
+        "labels": labels,         # 셀 -> 화면 표시 이름
     }
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
 
     print(f"\n완료 -> {args.out} ({os.path.getsize(args.out)/1024:.0f}KB)")
-    print(f"  시군구 {len(shapes)}/{len(REGIONS)}개 · 좌표 {total_pts:,}개")
+    print(f"  지도 셀 {len(cells)}개 · 시군구 {len(cell_of)}/{len(REGIONS)}개 매핑 "
+          f"· 좌표 {total_pts:,}개")
     if missing:
         print(f"  ! 경계를 못 찾은 {len(missing)}개: " + ", ".join(missing), file=sys.stderr)
 
