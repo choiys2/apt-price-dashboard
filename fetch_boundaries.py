@@ -182,6 +182,18 @@ def main():
         p = feats[0].get("properties", {}) if feats else {}
         print("  속성 키:", list(p))
         print("  샘플:", json.dumps(p, ensure_ascii=False)[:300])
+        # KOSTAT 코드는 법정동코드와 체계가 다르다(서귀포시가 39020, 법정동은 50130).
+        # 매핑을 추측하지 않도록 수도권으로 보이는 피처를 코드-이름 그대로 전부 출력한다.
+        print("\n  수도권 후보 피처 (코드 오름차순):")
+        cand = []
+        for f in feats:
+            pr = f.get("properties", {})
+            c, n = feature_code(pr), feature_name(pr)
+            if c[:2] in ("11", "23", "28", "31", "41"):
+                cand.append((c, n))
+        for c, n in sorted(cand):
+            print(f"    {c}  {n}")
+        print(f"  총 {len(cand)}개")
         return
 
     shapes, missing = build(geo, args.tol)
