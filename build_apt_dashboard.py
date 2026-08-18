@@ -150,6 +150,8 @@ input[type=search]{background:var(--panel-2);border:1px solid var(--line);
   min-width:190px}
 input[type=search]:focus{outline:none;border-color:var(--accent)}
 .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+/* 200행짜리 표를 통째로 펼치면 페이지가 8,000px 가 된다. 표 안에서 스크롤시킨다. */
+.scroll.tall{max-height:540px;overflow-y:auto}
 table{width:100%;border-collapse:collapse;font-size:13.5px;
   font-variant-numeric:tabular-nums;white-space:nowrap}
 th,td{padding:9px 11px;text-align:right;border-bottom:1px solid var(--line)}
@@ -180,6 +182,8 @@ td.name{font-weight:560}
 .dist{display:grid;gap:10px}
 .dist-row{display:grid;grid-template-columns:92px 1fr 232px;gap:12px;align-items:center;
   font-size:13.5px}
+/* 매도·매수를 한 줄에 같이 적는 칸은 232px 에 안 들어가 잘린다 */
+.dist.wide .dist-row{grid-template-columns:88px 1fr 320px}
 .track{background:var(--panel-2);border-radius:6px;height:22px;overflow:hidden}
 .fill{background:var(--accent);height:100%;opacity:.5;border-radius:6px}
 .dist-val{text-align:right;font-variant-numeric:tabular-nums;color:var(--muted);
@@ -191,7 +195,8 @@ footer ul{padding-left:18px;margin:8px 0 0}
 @media(max-width:640px){
   .wrap{padding:20px 14px 48px}
   .kpi .value{font-size:23px}
-  .dist-row{grid-template-columns:74px 1fr;grid-template-areas:"a b" "c c"}
+  .dist-row,.dist.wide .dist-row{grid-template-columns:74px 1fr;
+    grid-template-areas:"a b" "c c"}
   .dist-val{grid-area:c;text-align:left}
   .tab{padding:9px 13px;font-size:13.5px}
 }
@@ -225,15 +230,28 @@ footer ul{padding-left:18px;margin:8px 0 0}
 
 <section class="card">
   <div class="chart-head">
-    <h2>월별 거래량 · 중위 평당가</h2>
-    <div class="legend">
-      <span><i style="background:var(--accent);opacity:.45"></i>거래건수</span>
-      <span><i style="background:var(--up)"></i>중위 평당가(만원)</span>
-      <span><i style="background:var(--up);opacity:.25"></i>25~75% 구간</span>
-      <span class="muted">옅은 구간 = 신고 지연 잠정치</span>
+    <h2 id="chart-title">월별 거래량 · 중위 평당가</h2>
+    <div class="seg" id="chart-mode">
+      <button data-mode="month" aria-pressed="true">월간</button>
+      <button data-mode="week" aria-pressed="false">주간</button>
     </div>
   </div>
+  <div class="legend" style="margin-bottom:10px">
+    <span><i style="background:var(--accent);opacity:.45"></i>거래건수</span>
+    <span><i style="background:var(--up)"></i>중위 평당가(만원)</span>
+    <span id="lg-band"><i style="background:var(--up);opacity:.25"></i>25~75% 구간</span>
+    <span class="muted">옅은 구간 = 신고 지연 잠정치</span>
+  </div>
   <div id="chart"></div>
+  <p class="sub" id="chart-note" style="margin-top:10px"></p>
+</section>
+
+<!-- 확정도: 앞의 차트에서 "잠정"이라고만 하던 것을 측정값으로 바꾼다 -->
+<section class="card" id="settle-card" style="display:none">
+  <h2>거래 확정도 (등기완료율)</h2>
+  <p class="sub" id="settle-note" style="margin:0 0 14px"></p>
+  <div class="dist" id="settle"></div>
+  <p class="sub" id="settle-warn" style="margin-top:12px"></p>
 </section>
 
 <section class="card">
@@ -290,6 +308,32 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <div class="dist" id="dealtype"></div>
   <p class="sub" style="margin-top:12px">직거래는 가족 간 증여성 거래 등이 섞여 시세보다
     낮게 신고되는 경우가 많다. 위 필터의 "중개거래만"으로 제외하고 볼 수 있다.</p>
+</section>
+
+<section class="card" id="party-card" style="display:none">
+  <h2>매도자 · 매수자 구성</h2>
+  <p class="sub" id="party-note" style="margin:0 0 14px"></p>
+  <div class="dist wide" id="party"></div>
+  <div id="party-chart" style="margin-top:16px"></div>
+  <p class="sub" id="party-foot" style="margin-top:10px"></p>
+</section>
+
+<section class="card" id="anom-card" style="display:none">
+  <div class="table-head">
+    <h2 style="margin:0">확인이 필요한 거래</h2>
+    <div class="filters" style="margin:0" id="anom-tabs"></div>
+  </div>
+  <p class="sub" id="anom-note" style="margin:0 0 12px"></p>
+  <div class="scroll tall"><table class="rh">
+    <thead><tr>
+      <th style="cursor:default">계약일</th><th style="cursor:default">지역</th>
+      <th style="cursor:default">단지</th><th style="cursor:default">전용</th>
+      <th style="cursor:default">거래가</th><th style="cursor:default">단지 시세</th>
+      <th style="cursor:default">괴리</th><th style="cursor:default">신호</th>
+    </tr></thead>
+    <tbody id="anom-body"></tbody>
+  </table></div>
+  <p class="sub" id="anom-warn" style="margin-top:12px"></p>
 </section>
 
 <!-- 예산으로 찾기는 개요의 마지막 칸이다. 앞의 지표들을 다 본 뒤
@@ -440,6 +484,7 @@ let sortKey = 'median_ppp', sortDir = -1;
 let query = '';
 let dealType = 'all';          // 'all' | 'broker' (직거래 제외)
 let rhTab = 'highs';           // 'highs' | 'lows'
+let chartMode = 'month';       // 'month' | 'week'
 // 예산 조건은 개요의 "예산으로 찾기"와 지도의 "예산 도달률"이 함께 쓴다.
 // 두 화면이 서로 다른 예산을 보고 있으면 같은 질문에 다른 답이 나온다.
 const BST = {budget: 80000, area: 84};
@@ -554,8 +599,21 @@ function renderKpi(){
     </div>`).join('');
 }
 
-/* ---------- 차트 ---------- */
+/* ---------- 차트 ----------
+   월간과 주간을 같은 그림으로 그린다. 월별 차트는 최신 달이 아직 열흘밖에 안 지났어도
+   반토막으로 보이는데, 주 단위로 끊으면 그 착시가 없다. */
+function weeklyFor(s){
+  const v = V();
+  if (s === 'ALL') return (v.weekly || {}).weeks || [];
+  const e = v.sido.find(x => x.sido === s);
+  return e && e.weekly ? e.weekly.weeks : [];
+}
+
 function renderChart(){
+  if (chartMode === 'week') return renderWeekChart();
+  $('#chart-title').textContent = '월별 거래량 · 중위 평당가';
+  $('#lg-band').hidden = false;
+  $('#chart-note').textContent = '';
   const ms = monthlyFor(sido);
   const W = 860, H = 300, ml = 52, mr = 58, mt = 16, mb = 42;
   const iw = W - ml - mr, ih = H - mt - mb;
@@ -625,6 +683,209 @@ function renderChart(){
   $('#chart').innerHTML = svg;
 }
 
+function renderWeekChart(){
+  const ws = weeklyFor(sido);
+  $('#chart-title').textContent = '주별 거래량 · 중위 평당가 (계약일 기준)';
+  $('#lg-band').hidden = true;          // 주간은 사분위를 내지 않는다
+  if (!ws.length){ $('#chart').innerHTML = '<p class="sub">주간 데이터 없음</p>'; return; }
+
+  const W = 860, H = 300, ml = 52, mr = 58, mt = 16, mb = 42;
+  const iw = W-ml-mr, ih = H-mt-mb;
+  const maxC = Math.max(...ws.map(w => w.count), 1);
+  const ppps = ws.map(w => w.median_ppp).filter(v => v != null);
+  const pMax = ppps.length ? Math.max(...ppps) : 1, pMin = ppps.length ? Math.min(...ppps) : 0;
+  const pad = Math.max((pMax-pMin)*0.35, pMax*0.03);
+  const pLo = Math.max(0, pMin-pad), pHi = pMax+pad;
+  const bw = iw/ws.length;
+  const x = i => ml + bw*i + bw*0.5;
+  const yC = v => mt + ih - (v/maxC)*ih;
+  const yP = v => mt + ih - ((v-pLo)/((pHi-pLo)||1))*ih;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="주별 거래량과 중위 평당가">`;
+  for (let t = 0; t <= 4; t++){
+    const y = mt + ih - ih*t/4;
+    svg += `<line class="gridline" x1="${ml}" y1="${y}" x2="${ml+iw}" y2="${y}"/>`
+        +  `<text class="axis-text" x="${ml-8}" y="${y+4}" text-anchor="end">${nf(Math.round(maxC*t/4))}</text>`
+        +  `<text class="axis-text" x="${ml+iw+8}" y="${y+4}">${nf(Math.round(pLo+(pHi-pLo)*t/4))}</text>`;
+  }
+  ws.forEach((w,i) => {
+    const h = ih - (yC(w.count) - mt);
+    svg += `<rect class="bar${w.provisional?' prov':''}" x="${ml+bw*i+bw*0.16}" y="${yC(w.count)}"`
+        +  ` width="${bw*0.68}" height="${Math.max(h,0)}" rx="2"><title>${w.week} 주 ${nf(w.count)}건`
+        +  `${w.provisional?' (아직 차오르는 중)':''}</title></rect>`;
+  });
+  const pts = ws.map((w,i) => w.median_ppp == null ? null : [x(i), yP(w.median_ppp)]);
+  const firstProv = ws.findIndex(w => w.provisional);
+  const path = a => a.map((p,i) => (i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ');
+  const solid = pts.slice(0, firstProv < 0 ? pts.length : firstProv+1).filter(Boolean);
+  const dashed = (firstProv < 0 ? [] : pts.slice(firstProv)).filter(Boolean);
+  if (solid.length > 1) svg += `<path class="pline" d="${path(solid)}"/>`;
+  if (dashed.length > 1) svg += `<path class="pline prov" d="${path(dashed)}"/>`;
+  ws.forEach((w,i) => { if (w.median_ppp == null) return;
+    svg += `<circle class="pdot" cx="${x(i)}" cy="${yP(w.median_ppp)}" r="2.6">`
+        +  `<title>${w.week} 주 ${nf(w.median_ppp)}만원/평</title></circle>`; });
+  const step = Math.ceil(ws.length/9);
+  ws.forEach((w,i) => { if (i % step && i !== ws.length-1) return;
+    svg += `<text class="axis-text" x="${x(i)}" y="${mt+ih+18}" text-anchor="middle">${w.week.slice(5)}</text>`; });
+  svg += `<text class="axis-text" x="${ml}" y="${H-6}">건수</text>`
+      +  `<text class="axis-text" x="${ml+iw}" y="${H-6}" text-anchor="end">만원/평</text></svg>`;
+  $('#chart').innerHTML = svg;
+  const wk = (V().weekly || {});
+  $('#chart-note').textContent = wk.note || '';
+}
+
+/* ---------- 거래 확정도 (등기완료율) ---------- */
+function renderSettlement(){
+  const s = D.settlement;
+  if (!s || !s.months.some(m => m.rate_pct != null)) return;
+  $('#settle-card').style.display = '';
+  $('#settle-note').innerHTML =
+    `계약에서 소유권 이전 등기까지 <b style="color:var(--text)">중위 ${s.overall_median_days}일</b> `
+    + `(25~75% ${s.p25_days}~${s.p75_days}일, ${nf(s.measured)}건 실측). `
+    + `아래는 각 달의 계약 중 등기가 확인된 비율이다. `
+    + `<b style="color:var(--text)">"최근 2개월은 잠정"이라는 규칙을 관측값으로 바꾼 것</b>이다.`;
+  const rows = s.months.filter(m => m.total >= s.min_rows);
+  $('#settle').innerHTML = rows.map(m => {
+    const v = m.rate_pct ?? 0;
+    // 확정도가 낮을수록 붉게. 색이 "이 달은 아직 덜 여물었다"를 대신 말한다.
+    const col = v >= 90 ? 'var(--down)' : v >= 50 ? 'var(--accent)' : 'var(--up)';
+    return `<div class="dist-row">
+      <div>${esc(m.ym)}</div>
+      <div class="track"><div class="fill" style="width:${v.toFixed(1)}%;background:${col};opacity:.6"></div></div>
+      <div class="dist-val"><b style="color:var(--text)">${v.toFixed(1)}%</b>
+        · ${nf(m.registered)}/${nf(m.total)}건${m.median_days != null
+          ? ` · 중위 ${m.median_days}일`
+          : (m.days_biased ? ' · <span class="muted">소요일 산출 보류</span>' : '')}</div>
+    </div>`;
+  }).join('');
+  $('#settle-warn').innerHTML =
+    `<b>이 값을 시장 지표로 읽으면 안 된다.</b> 최근 달의 완료율이 낮은 것은 등기가 안 될 `
+    + `거래여서가 아니라 아직 등기할 시간이 지나지 않았기 때문이다. 해제율과 같은 종류의 `
+    + `관측 편향이라, "요즘 등기가 잘 안 된다"로 읽어서는 안 된다. `
+    + `뒤집어 보는 것이 맞다 — 완료율이 낮은 달일수록 앞으로 값이 더 움직일 여지가 크다. `
+    + `<br>완료율이 ${s.days_min_rate}% 미만인 달은 소요일을 내지 않는다. 그 달에 등기가 `
+    + `확인된 건은 유난히 빨리 끝난 것들뿐이라, 중위값을 내면 실제보다 짧게 나온다 `
+    + `(완료율 3.6%인 달을 그대로 계산하면 "중위 2일"이 된다).`;
+}
+
+/* ---------- 매도자 · 매수자 구성 ---------- */
+function renderParty(){
+  const p = D.party;
+  if (!p || !p.seller) return;
+  $('#party-card').style.display = '';
+  const sc = p.seller['법인'], bc = p.buyer['법인'];
+  $('#party-note').innerHTML =
+    `법인 <b style="color:var(--text)">매도 ${sc ? sc.pct : 0}%</b> vs `
+    + `<b style="color:var(--text)">매수 ${bc ? bc.pct : 0}%</b> — `
+    + (sc && bc && sc.pct > bc.pct
+        ? `법인이 <b style="color:var(--text)">순매도</b> 쪽이다(차이 ${(sc.pct-bc.pct).toFixed(2)}%p).`
+        : `법인 매수·매도 비중이 비슷하다.`);
+
+  const order = ['개인','법인','공공기관','기타','미상'];
+  const keys = order.filter(k => p.seller[k] || p.buyer[k]);
+  $('#party').innerHTML = keys.map(k => {
+    const s = p.seller[k] || {count:0, pct:0}, b = p.buyer[k] || {count:0, pct:0};
+    const max = Math.max(s.pct, b.pct, 0.01);
+    // 개인이 98%라 같은 축으로 그리면 나머지가 보이지 않는다. 행마다 자기 최대로 맞춘다.
+    return `<div class="dist-row">
+      <div>${esc(k)}</div>
+      <div class="track" style="display:flex;flex-direction:column;gap:2px;height:26px;background:none">
+        <div style="flex:1;background:var(--panel-2);border-radius:3px;overflow:hidden">
+          <div class="fill" style="width:${(s.pct/max*100).toFixed(1)}%;background:var(--up)"></div></div>
+        <div style="flex:1;background:var(--panel-2);border-radius:3px;overflow:hidden">
+          <div class="fill" style="width:${(b.pct/max*100).toFixed(1)}%;background:var(--down)"></div></div>
+      </div>
+      <div class="dist-val">매도 <b style="color:var(--text)">${s.pct}%</b> (${nf(s.count)}) ·
+        매수 <b style="color:var(--text)">${b.pct}%</b> (${nf(b.count)})</div>
+    </div>`;
+  }).join('');
+
+  // 법인 매도 비중 추이
+  const ms = p.monthly.filter(m => m.seller_corp_pct != null);
+  if (ms.length > 1){
+    const W = 860, H = 170, ml = 46, mr = 20, mt = 12, mb = 34;
+    const iw = W-ml-mr, ih = H-mt-mb;
+    const vals = ms.flatMap(m => [m.seller_corp_pct, m.buyer_corp_pct]).filter(v => v != null);
+    const hi = Math.max(...vals, 0.5) * 1.15;
+    const x = i => ml + (iw/(ms.length-1))*i;
+    const y = v => mt + ih - (v/hi)*ih;
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="법인 매도·매수 비중 추이">`;
+    for (let t = 0; t <= 3; t++){
+      const yy = mt + ih - ih*t/3;
+      svg += `<line class="gridline" x1="${ml}" y1="${yy}" x2="${ml+iw}" y2="${yy}"/>`
+          +  `<text class="axis-text" x="${ml-8}" y="${yy+4}" text-anchor="end">${(hi*t/3).toFixed(1)}%</text>`;
+    }
+    const line = (key, cls) => {
+      const pts = ms.map((m,i) => m[key] == null ? null : [x(i), y(m[key])]).filter(Boolean);
+      return pts.length < 2 ? '' :
+        `<path class="pline" style="stroke:var(--${cls})" d="${pts.map((q,i)=>(i?'L':'M')+q[0].toFixed(1)+' '+q[1].toFixed(1)).join(' ')}"/>`
+        + pts.map(q => `<circle cx="${q[0].toFixed(1)}" cy="${q[1].toFixed(1)}" r="2.8" fill="var(--${cls})"/>`).join('');
+    };
+    svg += line('seller_corp_pct','up') + line('buyer_corp_pct','down');
+    const step = ms.length > 8 ? 2 : 1;
+    ms.forEach((m,i) => { if (i % step && i !== ms.length-1) return;
+      svg += `<text class="axis-text" x="${x(i)}" y="${mt+ih+18}" text-anchor="middle">${m.ym.slice(2)}</text>`; });
+    svg += '</svg>';
+    $('#party-chart').innerHTML =
+      `<div class="legend" style="margin-bottom:6px">
+         <span><i style="background:var(--up)"></i>법인 매도 비중</span>
+         <span><i style="background:var(--down)"></i>법인 매수 비중</span></div>` + svg;
+  }
+  const top = p.regions.slice(0, 5).map(r =>
+    `${esc(shortName(r.region))} ${r.net_corp_sell_pct}%p`).join(' · ');
+  $('#party-foot').innerHTML =
+    `법인 순매도(매도−매수)가 큰 곳: ${top}. `
+    + `거래 ${p.min_rows}건 이상인 시군구만 낸다. `
+    + `<span class="muted">법인 매도는 시행사·임대사업자 물량 정리부터 단순 자산 재배치까지 `
+    + `원인이 여럿이라, 비중 자체를 호재나 악재로 읽을 수 없다.</span>`;
+}
+
+/* ---------- 확인이 필요한 거래 ---------- */
+let anomFlag = 'ALL';
+function renderAnomalies(){
+  const a = D.anomalies;
+  if (!a || !a.rows.length) return;
+  $('#anom-card').style.display = '';
+  // 탭 숫자는 목록에 실제로 실린 건수다. 전체 집계 수는 아래 설명에 따로 적는다.
+  const sc = a.shown_flag_counts || a.flag_counts;
+  const tabs = [['ALL', `전체 ${nf(a.rows.length)}건`],
+    ...Object.entries(sc).sort((x,y) => y[1]-x[1]).map(([f,n]) => [f, `${f} ${nf(n)}`])];
+  $('#anom-tabs').innerHTML = tabs.map(([v,label]) =>
+    `<button class="chip" data-f="${esc(v)}" aria-pressed="${v===anomFlag}">${esc(label)}</button>`).join('');
+  $('#anom-tabs').querySelectorAll('.chip').forEach(b =>
+    b.onclick = () => { anomFlag = b.dataset.f; renderAnomalies(); });
+
+  const rows = anomFlag === 'ALL' ? a.rows : a.rows.filter(r => r.flags.includes(anomFlag));
+  const allTotals = Object.entries(a.flag_counts).sort((x,y) => y[1]-x[1])
+    .map(([f,n]) => `${f} ${nf(n)}`).join(' · ');
+  $('#anom-note').innerHTML =
+    `${a.window[0]}~${a.window[a.window.length-1]} 계약 중 <b>시세 괴리나 등기 지연이 있으면서 `
+    + `다른 신호가 겹친</b> 것은 모두 <b style="color:var(--text)">${nf(a.total)}건</b>(${allTotals}), `
+    + `그중 신호가 많이 겹친 순으로 ${nf(a.rows.length)}건만 싣는다 · 지금 표시 ${nf(rows.length)}건. `
+    + `시세 괴리는 같은 단지 × 같은 전용타입의 중위가 대비 ${a.discount_pct}% 이상 싼 경우이고, `
+    + `${a.peer_window[0]}~${a.peer_window[a.peer_window.length-1]} 안에서만 판정한다. `
+    + `등기 지연은 계약 후 ${a.stale_days}일이 지나도록 등기가 없는 경우다.`;
+  $('#anom-body').innerHTML = rows.map(r => `<tr>
+      <td>${esc(r.deal_date.slice(2))}</td>
+      <td>${esc(shortName(r.region))}${r.umd ? ' ' + esc(r.umd) : ''}</td>
+      <td class="name">${esc(r.apt || '')}</td>
+      <td>${r.area_type ?? '–'}㎡</td>
+      <td><b>${fmtAmount(r.amount_manwon)}</b></td>
+      <td class="muted">${r.peer_median ? fmtAmount(r.peer_median) : '–'}</td>
+      <td>${r.gap_pct == null ? '<span class="muted">–</span>' : pct(r.gap_pct)}</td>
+      <td style="text-align:left">${r.flags.map(f =>
+        `<span class="hist-item" style="margin-right:3px">${esc(f)}</span>`).join('')}</td>
+    </tr>`).join('')
+    || `<tr><td colspan="8" class="muted" style="text-align:center;padding:24px">해당 신호가 없다</td></tr>`;
+  $('#anom-warn').innerHTML =
+    `<b>이 목록은 위법의 증거가 아니다.</b> 신축 저층, 특약이 붙은 매매, 가족 간 거래, `
+    + `단순 신고 오류가 모두 같은 신호를 낸다. 직거래와 법인 매도는 그 자체로는 흔한 일이라 `
+    + `(직거래+법인매도만 겹친 경우는 2천 건이 넘어 제외했다) 시세 괴리나 등기 지연이 `
+    + `함께 있을 때만 올렸을 뿐이고, 그래도 <b>판단이 아니라 확인의 출발점</b>이다. `
+    + `조합별로는 ${Object.entries(a.combo_counts).slice(0,3)
+        .map(([k,v]) => `${esc(k)} ${nf(v)}건`).join(' · ')} 순이다.`;
+}
+
 /* ---------- 랭킹 테이블 ---------- */
 const COLS = [
   {k:'rank',          t:'#',          f:r => r.rank},
@@ -639,6 +900,8 @@ const COLS = [
   {k:'ref_count',     t:'기준월 건수',   f:r => nf(r.ref_count)},
   {k:'mom_count_pct', t:'전월비 건수',   f:r => pct(r.mom_count_pct)},
   {k:'mom_ppp_pct',   t:'전월비 평당가', f:r => pct(r.mom_ppp_pct)},
+  {k:'outside_pct',   t:'외지 중개',    f:r => r.outside_pct == null
+      ? '<span class="muted">–</span>' : r.outside_pct.toFixed(1) + '%'},
 ];
 
 function sorted(rows){
@@ -677,9 +940,11 @@ function renderTable(){
 function downloadCsv(){
   const rows = sorted(regionsFor(sido));
   const head = ['순위','지역','중위평당가(만원)','중위거래가(만원)','거래건수','비중(%)',
-                '25%(만원)','75%(만원)','평균전용(㎡)','기준월건수','전월비건수(%)','전월비평당가(%)'];
+                '25%(만원)','75%(만원)','평균전용(㎡)','기준월건수','전월비건수(%)','전월비평당가(%)',
+                '외지중개(%)'];
   const body = rows.map(r => [r.rank, r.region, r.median_ppp, r.median_amount, r.count,
-    r.share_pct, r.p25_ppp, r.p75_ppp, r.avg_area, r.ref_count, r.mom_count_pct, r.mom_ppp_pct]
+    r.share_pct, r.p25_ppp, r.p75_ppp, r.avg_area, r.ref_count, r.mom_count_pct, r.mom_ppp_pct,
+    r.outside_pct]
     .map(v => v == null ? '' : `"${String(v).replace(/"/g,'""')}"`).join(','));
   // 엑셀이 UTF-8을 인식하도록 BOM을 붙인다
   const blob = new Blob(['﻿' + [head.join(','), ...body].join('\r\n')],
@@ -916,6 +1181,10 @@ const METRICS = {
                fmt:v => (v>0?'+':'') + v.toFixed(1)},
   budget:     {label:'예산 도달률', unit:'%', kind:'seq', monthly:null,
                fmt:v => v.toFixed(1)},
+  // 매물 소재지와 중개사 소재지가 다른 거래의 비중. "이 동네를 사는 사람이 이 동네
+  // 사람인가"에 가장 가까운 관측값이다.
+  outside_pct:{label:'외지 중개', unit:'%', kind:'seq', monthly:null,
+               fmt:v => v.toFixed(1)},
 };
 // 낮은 값 -> 높은 값. 남색에서 시작해 마지막에 산호색으로 튄다. 시작을 너무 어둡게
 // 잡으면 값이 하위에 몰린 경기 외곽이 전부 같은 색으로 뭉개진다.
@@ -1008,7 +1277,12 @@ function cellValue(cell, key, mi){
   let num = 0, den = 0;
   for (const l of lawds){
     const r = by[l]; if (!r) continue;
-    const val = r[key], w = (key === 'mom_ppp_pct' ? r.ref_count : r.count) || 0;
+    // 가중치는 지표마다 다르다. 전월비는 기준월 건수, 외지 중개는 판정 가능했던
+    // 건수(중개사 소재지가 있는 건)로 묶어야 병합 셀의 합산이 어긋나지 않는다.
+    const val = r[key];
+    const w = (key === 'mom_ppp_pct' ? r.ref_count
+             : key === 'outside_pct' ? r.outside_judged
+             : r.count) || 0;
     if (val == null || !w) continue;
     num += val * w; den += w;
   }
@@ -1553,8 +1827,18 @@ renderBudget();
 renderFloorPremium();
 renderJeonse();
 renderDealType();
+renderSettlement();
+renderParty();
+renderAnomalies();
 setupMap();
 renderAll();
+
+$('#chart-mode').querySelectorAll('button').forEach(b => b.onclick = () => {
+  chartMode = b.dataset.mode;
+  $('#chart-mode').querySelectorAll('button').forEach(x =>
+    x.setAttribute('aria-pressed', String(x.dataset.mode === chartMode)));
+  renderChart();
+});
 
 $('#tabs').querySelectorAll('.tab').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 if (GEO){

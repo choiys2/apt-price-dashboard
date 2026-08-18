@@ -223,5 +223,78 @@ class CircuitBreakerTest(unittest.TestCase):
         self.assertEqual(len(seq), expected)
 
 
+class RgstDateTest(unittest.TestCase):
+    """등기일자 파싱. 빈 값이 "아직 등기 안 됨"으로 읽히므로 파싱 실패를 미등기로 세면
+    확정도를 실제보다 낮게 보고하게 된다."""
+
+    def test_two_digit_year_expands(self):
+        self.assertEqual(fetch._rgst_date("26.02.03"), "2026-02-03")
+        self.assertEqual(fetch._rgst_date("25.12.23"), "2025-12-23")
+
+    def test_blank_and_garbage_are_none(self):
+        for bad in ("", "   ", None, "2026-02-03", "26.2.3", "26.13.01", "26.02.32"):
+            self.assertIsNone(fetch._rgst_date(bad), f"{bad!r} 을 통과시켰다")
+
+    def test_whitespace_tolerated(self):
+        self.assertEqual(fetch._rgst_date("  26.02.03  "), "2026-02-03")
+
+
+class AgentLocalityTest(unittest.TestCase):
+    """중개사 소재지 비교. 한쪽만 접두로 보면 신설 구가 통째로 외지로 잡힌다."""
+
+    def test_same_district_is_local(self):
+        self.assertFalse(fetch._agent_is_outside("서울 강남구", "서울특별시 강남구"))
+        self.assertFalse(fetch._agent_is_outside("경기 성남시 분당구", "경기도 성남시 분당구"))
+
+    def test_different_district_is_outside(self):
+        self.assertTrue(fetch._agent_is_outside("서울 송파구", "서울특별시 강남구"))
+        self.assertTrue(fetch._agent_is_outside("경기 수원시 팔달구", "서울특별시 중구"))
+
+    def test_new_district_matched_by_old_city_name(self):
+        # 2026 신설 구는 중개사 소재지가 아직 "경기 화성시" 로만 찍힌다. 한쪽 방향만
+        # 접두로 보면 같은 동네인데 외지로 잡혀, 실측 비중이 6.6% 대신 8.0% 로 부풀었다.
+        self.assertFalse(fetch._agent_is_outside("경기 화성시", "경기도 화성시 만세구"))
+        self.assertFalse(fetch._agent_is_outside("경기 수원시", "경기도 수원시 팔달구"))
+
+    def test_unknown_agent_is_not_judged(self):
+        # 모르는 것을 "같은 동네"로 세면 외지 비중이 실제보다 낮아진다.
+        self.assertIsNone(fetch._agent_is_outside("", "서울특별시 강남구"))
+        self.assertIsNone(fetch._agent_is_outside(None, "서울특별시 강남구"))
+        self.assertIsNone(fetch._agent_is_outside("서울 강남구", ""))
+
+
+class NewFieldsNormalizeTest(unittest.TestCase):
+    ROW = {
+        "sggCd": "11680", "umdNm": "대치동", "aptNm": "테스트", "jibun": "910-5",
+        "excluUseAr": "83.65", "dealAmount": "132,000",
+        "dealYear": "2026", "dealMonth": "5", "dealDay": "4",
+        "floor": "2", "buildYear": "2003", "dealingGbn": "중개거래",
+        "slerGbn": "법인", "buyerGbn": "개인",
+        "estateAgentSggNm": "서울 강남구", "rgstDate": "26.07.20",
+    }
+
+    def test_carries_new_fields(self):
+        r = normalize(self.ROW, "11680")
+        self.assertEqual(r["deal_day"], 4)
+        self.assertEqual(r["agent_sgg"], "서울 강남구")
+        self.assertEqual(r["rgst_date"], "2026-07-20")
+        self.assertEqual(r["seller"], "법인")
+        self.assertFalse(r["is_outside_agent"])
+
+    def test_days_to_registration(self):
+        r = normalize(self.ROW, "11680")
+        self.assertEqual(r["days_to_rgst"], 77)      # 2026-05-04 -> 2026-07-20
+
+    def test_unregistered_leaves_none_not_zero(self):
+        # 0 으로 두면 "계약 당일 등기"가 되어 소요일 통계가 통째로 망가진다.
+        r = normalize({**self.ROW, "rgstDate": ""}, "11680")
+        self.assertIsNone(r["rgst_date"])
+        self.assertIsNone(r["days_to_rgst"])
+
+    def test_outside_agent_detected(self):
+        r = normalize({**self.ROW, "estateAgentSggNm": "경기 성남시 분당구"}, "11680")
+        self.assertTrue(r["is_outside_agent"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

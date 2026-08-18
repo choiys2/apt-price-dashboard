@@ -19,7 +19,7 @@ fetch_apt_trades.py 가 만든 정규화 레코드를 받아 대시보드가 바
 import json
 import os
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date
 from statistics import median, quantiles
 
@@ -145,6 +145,11 @@ def region_ranking(records, months):
         cur_s = summarize(by_month.get(ref, []))
         prev_s = summarize(by_month.get(prev, []))
         sample = group[0]
+        # 외지 중개 비중. 지도의 지표로 바로 쓰려고 랭킹 행에 같이 싣는다.
+        # 판단 불가(중개사 소재지 없음·직거래)는 분모에서 뺀다.
+        judged = [r for r in group if r.get("is_outside_agent") is not None]
+        outside = (round(sum(1 for r in judged if r["is_outside_agent"]) / len(judged) * 100, 1)
+                   if len(judged) >= 200 else None)
         rows.append({
             "lawd_cd": code,
             "region": sample["region"],
@@ -161,6 +166,8 @@ def region_ranking(records, months):
             "ref_ppp": cur_s["median_ppp"],
             "mom_count_pct": _pct_change(cur_s["count"], prev_s["count"]),
             "mom_ppp_pct": _pct_change(cur_s["median_ppp"], prev_s["median_ppp"]),
+            "outside_pct": outside,
+            "outside_judged": len(judged),
         })
     # 중위 평당가 내림차순. 단가가 없는 지역(거래 0건)은 뒤로 보낸다.
     rows.sort(key=lambda r: (r["median_ppp"] is not None, r["median_ppp"] or 0), reverse=True)
@@ -170,10 +177,12 @@ def region_ranking(records, months):
 
 
 def sido_rollup(records, months):
+    anchor = week_anchor(records)
     rows = []
     for sido, group in _group(records, lambda r: r["region"].split(" ")[0]).items():
         rows.append({"sido": sido, **summarize(group),
-                     "monthly": monthly_series(group, months)})
+                     "monthly": monthly_series(group, months),
+                     "weekly": weekly_series(group, anchor=anchor)})
     # 거래량순이 아니라 행정구역 통념 순서(서울-인천-경기)로 둔다. 필터 버튼 순서가 된다.
     rows.sort(key=lambda r: SIDO_ORDER.index(r["sido"]) if r["sido"] in SIDO_ORDER else 99)
     return rows
@@ -388,6 +397,278 @@ def deal_type_stats(records):
     }
 
 
+def settlement_series(records, months, min_rows=30, days_min_rate=80.0):
+    """월별 등기완료율과 계약->등기 소요일. "이 달 수치를 얼마나 믿을 수 있나"의 측정값.
+
+    지금까지 "최근 2개월은 잠정"이라고 규칙으로 선언만 했다. 등기일자를 쓰면 그것을
+    관측값으로 바꿀 수 있다. 실측: 계약에서 등기까지 중위 69일이고, 월별 등기완료율은
+    2025-12 99.3% -> 2026-07 11.0% 로 최근일수록 급락한다.
+
+    주의 - 이 값은 시장 지표가 아니라 관측 성숙도 지표다. 최근 달의 완료율이 낮은 것은
+    등기가 안 될 거래여서가 아니라 아직 등기할 시간이 안 지났기 때문이다. 해제율과
+    같은 종류의 관측 편향이라, 시계열로 "등기가 잘 안 된다"고 읽으면 안 된다.
+    """
+    by = _group(records, lambda r: r["deal_ym"])
+    rows = []
+    for ym in months:
+        group = by.get(ym, [])
+        done = [r for r in group if r.get("rgst_date")]
+        gaps = [r["days_to_rgst"] for r in done if r.get("days_to_rgst") is not None]
+        # 표본이 얇은 달의 비율은 통째로 튄다. 아예 내지 않는다.
+        rate = (round(len(done) / len(group) * 100, 1)
+                if len(group) >= min_rows else None)
+        # 등기가 아직 절반도 안 끝난 달의 "중위 소요일"은 빠른 건만 보고 계산한 값이라
+        # 늘 짧게 나온다(실측: 완료율 3.6%인 달이 "중위 2일"). 생존 편향이라 내지 않는다.
+        # 이걸 그대로 보이면 "등기는 이틀이면 된다"로 읽힌다.
+        biased = rate is None or rate < days_min_rate
+        rows.append({
+            "ym": ym,
+            "total": len(group),
+            "registered": len(done),
+            "rate_pct": rate,
+            "median_days": (None if biased or len(gaps) < min_rows
+                            else round(median(gaps))),
+            "days_biased": biased,
+        })
+    allgaps = [r["days_to_rgst"] for r in records
+               if r.get("days_to_rgst") is not None and 0 <= r["days_to_rgst"] < 400]
+    return {
+        "months": rows,
+        "min_rows": min_rows,
+        "days_min_rate": days_min_rate,
+        "overall_median_days": round(median(allgaps)) if allgaps else None,
+        "p25_days": round(quantiles(allgaps, n=4)[0]) if len(allgaps) >= 4 else None,
+        "p75_days": round(quantiles(allgaps, n=4)[2]) if len(allgaps) >= 4 else None,
+        "measured": len(allgaps),
+    }
+
+
+def outside_agent_stats(records, months, min_rows=200):
+    """중개사 소재지가 매물 소재지와 다른 거래의 비중 - 원정 매수의 대리 지표.
+
+    "이 동네를 사는 사람이 이 동네 사람인가"에 직접 답하는 필드는 실거래가 API 에 없다.
+    중개사 소재지는 그 질문에 가장 가까운 관측값이다. 매수자가 자기 생활권 중개사를
+    데려오는 경우가 많기 때문이다.
+
+    한계는 분명하다 - 매수자가 아니라 중개사의 소재지이고, 매도측이 부른 중개사일 수도
+    있다. 그래서 "외지인 매수 비율"이라 부르지 않고 "외지 중개 비중"이라고만 한다.
+    직거래는 중개사가 없으니 애초에 분모에서 빠진다.
+
+    실측: 수도권 평균 6.6%, 서울 중구 26.0% 부터 고양 덕양구 1.5% 까지 17배 차이.
+    """
+    def share(group):
+        judged = [r for r in group if r.get("is_outside_agent") is not None]
+        if len(judged) < min_rows:
+            return None, len(judged)
+        out = sum(1 for r in judged if r["is_outside_agent"])
+        return round(out / len(judged) * 100, 1), len(judged)
+
+    overall, n = share(records)
+    regions = []
+    for code, group in _group(records, lambda r: r["lawd_cd"]).items():
+        pct, judged = share(group)
+        if pct is None:
+            continue
+        regions.append({"lawd_cd": code, "region": group[0]["region"],
+                        "outside_pct": pct, "judged": judged})
+    regions.sort(key=lambda r: r["outside_pct"], reverse=True)
+
+    by_month = _group(records, lambda r: r["deal_ym"])
+    series = []
+    for ym in months:
+        pct, judged = share(by_month.get(ym, []))
+        series.append({"ym": ym, "outside_pct": pct, "judged": judged})
+    return {"overall_pct": overall, "judged": n, "min_rows": min_rows,
+            "regions": regions, "monthly": series}
+
+
+def party_stats(records, months, min_rows=200):
+    """매도자·매수자 구성(개인/법인/공공기관). 법인 순매도 흐름을 본다.
+
+    실측: 법인 매도 2.25% 대 법인 매수 0.67% 로 법인이 순매도 쪽이다. 월별로는
+    2025-06 1.24% -> 2025-12 2.31% -> 2026-06 1.04% 로 움직였다.
+    """
+    def split(group, key):
+        c = Counter(r.get(key) or "미상" for r in group)
+        total = sum(c.values()) or 1
+        return {k: {"count": v, "pct": round(v / total * 100, 2)}
+                for k, v in c.most_common()}
+
+    def corp_pct(group, key):
+        if len(group) < min_rows:
+            return None
+        return round(sum(1 for r in group if r.get(key) == "법인") / len(group) * 100, 2)
+
+    by_month = _group(records, lambda r: r["deal_ym"])
+    series = [{"ym": ym,
+               "seller_corp_pct": corp_pct(by_month.get(ym, []), "seller"),
+               "buyer_corp_pct": corp_pct(by_month.get(ym, []), "buyer"),
+               "count": len(by_month.get(ym, []))}
+              for ym in months]
+
+    regions = []
+    for code, group in _group(records, lambda r: r["lawd_cd"]).items():
+        s, b = corp_pct(group, "seller"), corp_pct(group, "buyer")
+        if s is None:
+            continue
+        regions.append({"lawd_cd": code, "region": group[0]["region"], "count": len(group),
+                        "seller_corp_pct": s, "buyer_corp_pct": b,
+                        "net_corp_sell_pct": round(s - (b or 0), 2)})
+    regions.sort(key=lambda r: r["net_corp_sell_pct"], reverse=True)
+    return {"seller": split(records, "seller"), "buyer": split(records, "buyer"),
+            "monthly": series, "regions": regions, "min_rows": min_rows}
+
+
+def week_anchor(records):
+    """전체 거래에서 가장 최근 계약이 속한 주(월요일).
+
+    시도별 주간 시계열의 x축을 맞추려면 기준 주가 하나여야 한다. 각자 자기 최신 주를
+    끝으로 잡으면 서울과 인천의 같은 자리가 다른 주가 되어 필터를 바꿀 때마다 축이 밀린다.
+    """
+    from datetime import date as _date, timedelta
+    last = None
+    for r in records:
+        try:
+            d = _date(*map(int, r["deal_date"].split("-")))
+        except (ValueError, TypeError):
+            continue
+        if last is None or d > last:
+            last = d
+    return None if last is None else last - timedelta(days=last.weekday())
+
+
+def weekly_series(records, weeks=26, min_rows=1, anchor=None):
+    """계약일 기준 주간 시계열.
+
+    월별 차트는 최신 달이 아직 열흘밖에 안 지났어도 반토막으로 보인다. 주 단위로 끊으면
+    그 착시가 없다. 다만 신고 지연(계약 후 30일)은 그대로라 마지막 4~5주는 여전히
+    차오르는 중이고, 그 구간은 provisional 로 표시해 화면에서 구분한다.
+    """
+    from datetime import date as _date, timedelta
+
+    def monday(d):
+        return d - timedelta(days=d.weekday())
+
+    by = defaultdict(list)
+    for r in records:
+        try:
+            d = _date(*map(int, r["deal_date"].split("-")))
+        except (ValueError, TypeError):
+            continue
+        by[monday(d)].append(r)
+    last = anchor or (max(by) if by else None)
+    if last is None:
+        return {"weeks": [], "provisional_weeks": 0}
+
+    keys = [last - timedelta(weeks=i) for i in range(weeks - 1, -1, -1)]
+    # 신고 지연이 30일이므로 마지막 5주는 아직 차오르는 중이다.
+    prov = set(keys[-5:])
+    rows = []
+    for k in keys:
+        group = by.get(k, [])
+        ppp = [r["price_per_pyeong"] for r in group if r.get("price_per_pyeong")]
+        rows.append({"week": k.isoformat(), "count": len(group),
+                     "median_ppp": round(median(ppp)) if len(ppp) >= min_rows else None,
+                     "provisional": k in prov})
+    return {"weeks": rows, "provisional_weeks": 5,
+            "note": "계약일 기준 주(월요일 시작). 마지막 5주는 신고 지연으로 아직 차오르는 중이다."}
+
+
+def anomaly_flags(records, months, recent_months=6, scan_months=12, discount_pct=30,
+                  stale_days=180, min_peers=5, top_n=200):
+    """눈여겨볼 거래를 규칙으로 뽑는다. "이상"이 아니라 "확인이 필요한" 것들이다.
+
+    네 가지 신호를 각각 독립적으로 붙인다. 하나만으로는 아무 뜻도 아니고, 겹칠수록
+    설명이 필요해지는 것들이다.
+      - 시세 괴리: 같은 단지 x 같은 전용타입의 중위가 대비 discount_pct% 이상 싸다.
+        단지 안에서 비교하므로 지역·평형 차이는 이미 통제돼 있다.
+      - 직거래: 중개사 없이 이뤄진 거래. 실측으로 중개거래보다 중위 평당가가 28.5% 낮은데,
+        가족 간 증여성 거래가 섞이기 때문으로 알려져 있다.
+      - 법인 매도: 매도자가 법인.
+      - 등기 지연: 계약 후 stale_days 가 지나도록 등기가 없다.
+
+    쓰지 말아야 할 방식을 분명히 해둔다 - 이 목록은 위법의 증거가 아니다. 신축 저층,
+    특약이 붙은 매매, 단순 신고 오류 모두 같은 신호를 낸다. 판단 재료이지 판단이 아니다.
+
+    창이 두 개인 이유:
+      - 훑는 범위는 scan_months(12개월). 등기 지연은 계약 후 stale_days(180일)가
+        지나야 판정되는데, 6개월만 훑으면 그 조건에 닿는 거래가 아예 없어 신호가
+        구조적으로 죽는다(실제로 처음엔 한 건도 안 걸렸다).
+      - 시세 기준은 recent_months(6개월) 안에서만 잡는다. 기준을 12개월로 넓히면
+        그 사이 오르내린 만큼이 통째로 "싸게 팔렸다"로 잡힌다. 그래서 6개월 밖의
+        거래는 시세 괴리를 아예 판정하지 않고, 시점과 무관한 신호(직거래·법인매도·
+        등기지연)로만 걸린다.
+    """
+    from datetime import date as _date
+
+    peer_window = set(months[-recent_months:])
+    scan_window = set(months[-scan_months:])
+    # 시세 기준은 최근 거래분으로만 잡는다. 오래된 값을 기준 삼으면 시장이 움직인 만큼
+    # 과거 거래가 통째로 "싸게 팔린 것"으로 잡힌다.
+    peers = defaultdict(list)
+    for r in records:
+        atype = _area_type(r)
+        if (atype and r.get("apt") and r.get("amount_manwon") is not None
+                and r["deal_ym"] in peer_window):
+            peers[(r["lawd_cd"], r["apt"], atype)].append(r["amount_manwon"])
+    med = {k: median(v) for k, v in peers.items() if len(v) >= min_peers}
+
+    today = date.today()
+    rows = []
+    for r in records:
+        if r["deal_ym"] not in scan_window:
+            continue
+        atype = _area_type(r)
+        key = (r["lawd_cd"], r.get("apt"), atype)
+        # 6개월 밖의 거래에는 기준이 없다(위 주석 참고). gap 이 None 으로 남는다.
+        base = med.get(key) if r["deal_ym"] in peer_window else None
+        flags, gap = [], None
+        if base and r.get("amount_manwon") is not None:
+            gap = round((r["amount_manwon"] - base) / base * 100, 1)
+            if gap <= -discount_pct:
+                flags.append("시세괴리")
+        if not _is_broker(r):
+            flags.append("직거래")
+        if r.get("seller") == "법인":
+            flags.append("법인매도")
+        if not r.get("rgst_date"):
+            try:
+                age = (today - _date(*map(int, r["deal_date"].split("-")))).days
+            except (ValueError, TypeError):
+                age = 0
+            if age >= stale_days:
+                flags.append("등기지연")
+        # 올릴 조건: 드문 신호(시세괴리·등기지연)가 하나 이상 있고, 신호가 둘 이상 겹칠 것.
+        #
+        # 처음엔 "둘 이상"만 걸었는데 목록의 82%가 직거래+법인매도로 채워졌다(2,350건).
+        # 법인이 중개사 없이 파는 것은 흔한 일이라 그 조합만으로는 확인할 거리가 못 된다.
+        # 반면 시세 괴리와 등기 지연은 각각 369건·150건뿐이고 둘 다 "왜?"가 붙는 신호다.
+        # 그래서 이 둘을 닻으로 삼고, 직거래·법인매도는 정황을 더하는 역할만 하게 했다.
+        if len(flags) >= 2 and ("시세괴리" in flags or "등기지연" in flags):
+            rows.append({
+                "deal_date": r["deal_date"], "region": r["region"], "umd": r.get("umd"),
+                "apt": r.get("apt"), "area_type": atype, "floor": r.get("floor"),
+                "amount_manwon": r.get("amount_manwon"),
+                "peer_median": round(base) if base else None,
+                "gap_pct": gap, "flags": flags, "seller": r.get("seller"),
+                "buyer": r.get("buyer"), "registered": bool(r.get("rgst_date")),
+            })
+    # 겹친 신호가 많은 순, 같으면 괴리가 큰 순
+    rows.sort(key=lambda x: (len(x["flags"]), -(x["gap_pct"] or 0)), reverse=True)
+    shown = rows[:top_n]
+    counts = Counter(f for x in rows for f in x["flags"])
+    # 화면의 탭은 실제로 보여줄 수 있는 건수를 달아야 한다. 전체 집계 수를 달면
+    # "등기지연 150"을 눌렀는데 10건만 나오는 일이 생긴다.
+    shown_counts = Counter(f for x in shown for f in x["flags"])
+    combos = Counter("+".join(x["flags"]) for x in rows)
+    return {"rows": shown, "total": len(rows),
+            "shown_flag_counts": dict(shown_counts),
+            "window": months[-scan_months:], "peer_window": months[-recent_months:],
+            "flag_counts": dict(counts), "combo_counts": dict(combos.most_common()),
+            "discount_pct": discount_pct, "stale_days": stale_days,
+            "min_peers": min_peers}
+
+
 def region_monthly(records, months, min_samples=5):
     """시군구 × 월 요약. 입체 지도의 시간 재생(월을 넘기며 높이가 변하는 화면)에 쓴다.
 
@@ -530,6 +811,7 @@ def _views(records, months):
         "monthly": monthly_series(records, months),
         "sido": sido_rollup(records, months),
         "regions": region_ranking(records, months),
+        "weekly": weekly_series(records, anchor=week_anchor(records)),
         # 입체 지도의 시간 재생용. 전체본/중개거래본이 각자 갖고 있어야 지도에서
         # 직거래를 빼도 재생이 같은 기준으로 돈다.
         "region_monthly": region_monthly(records, months),
@@ -564,6 +846,12 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
         "deal_type": deal_type_stats(records),
         "record_highs": None,   # 아래에서 채운다
         "cancel_rate": cancel_rate_series(raw, months),
+        # 등기일자·중개사 소재지·매도자 구분은 원본에 늘 있었는데 쓰지 않고 있었다.
+        # 채움률은 각각 74.8% / 95.1% / 100% 다.
+        "settlement": settlement_series(records, months),
+        "outside_agent": outside_agent_stats(records, months),
+        "party": party_stats(records, months),
+        "anomalies": anomaly_flags(records, months),
     }
     rh = record_highs(records, months)
     result["record_highs"] = rh

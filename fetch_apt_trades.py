@@ -267,6 +267,44 @@ def _to_float(text):
         return None
 
 
+def _rgst_date(text):
+    """등기일자 'YY.MM.DD' -> 'YYYY-MM-DD'. 비었거나 형식이 다르면 None.
+
+    실측으로 값이 있는 건은 전부 8자 'YY.MM.DD' 였다. 그래도 형식을 확인하고
+    쓰는 이유는, 이 값이 비면 "아직 등기 안 됨"이라는 뜻으로 읽히기 때문이다.
+    파싱에 실패한 것을 미등기로 세면 확정도를 실제보다 낮게 보고하게 된다.
+    """
+    t = (text or "").strip()
+    m = re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{2})", t)
+    if not m:
+        return None
+    yy, mm, dd = (int(x) for x in m.groups())
+    if not (1 <= mm <= 12 and 1 <= dd <= 31):
+        return None
+    return f"{2000 + yy:04d}-{mm:02d}-{dd:02d}"
+
+
+def _agent_is_outside(agent, region):
+    """중개사 소재지가 매물 소재지와 다른가(원정 매수 대리 지표).
+
+    양쪽 다 접두로 비교한다. 신설 구는 중개사 소재지가 아직 옛 시 이름으로 찍혀
+    ("경기 화성시 만세구" 매물에 중개사는 그냥 "경기 화성시") 한쪽만 보면
+    같은 동네인데도 외지로 잡힌다. 실측으로 이 차이가 8.0% 대 6.6% 였다.
+
+    소재지가 비어 있으면(4.9%) 판단하지 않고 None 을 준다 - 모르는 것을
+    "같은 동네"로 세면 외지 비중이 실제보다 낮아진다.
+    """
+    a = (agent or "").strip()
+    if not a or not region:
+        return None
+    # region 은 "서울특별시 강남구" 꼴, agent 는 "서울 강남구" 꼴이다.
+    sido, _, sgg = region.partition(" ")
+    short = ("서울" if "서울" in sido else "인천" if "인천" in sido else
+             "경기" if "경기" in sido else sido)
+    home = f"{short} {sgg}".strip()
+    return not (a.startswith(home) or home.startswith(a))
+
+
 def normalize(row, lawd_cd):
     """API 원본 dict -> 대시보드 집계용 레코드. 필수값이 없으면 None."""
     amount = _to_int(_first(row, "dealAmount", "거래금액"))          # 만원 단위
@@ -299,7 +337,18 @@ def normalize(row, lawd_cd):
         "buyer": _first(row, "buyerGbn"),
         "canceled": cdeal in ("O", "Y"),              # 해제(취소)된 거래
         "cancel_day": _first(row, "cdealDay"),
+        "deal_day": day,                              # 주간 시계열용
+        "agent_sgg": _first(row, "estateAgentSggNm"), # 중개사 소재지 시군구
+        "rgst_date": _rgst_date(_first(row, "rgstDate")),
     }
+    rec["is_outside_agent"] = _agent_is_outside(rec["agent_sgg"], rec["region"])
+    # 계약 -> 등기까지 걸린 날. 등기가 아직 없으면 None 이고, 그 자체가 신호다
+    # (실측 중위 69일이라 최근 두세 달은 대부분 미등기다).
+    if rec["rgst_date"]:
+        rec["days_to_rgst"] = (date(*map(int, rec["rgst_date"].split("-")))
+                               - date(year, month, day)).days
+    else:
+        rec["days_to_rgst"] = None
     if area:
         rec["price_per_m2"] = round(amount / area, 2)                      # 만원/㎡
         rec["price_per_pyeong"] = round(amount / (area / PYEONG_PER_M2))   # 만원/평

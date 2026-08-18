@@ -6,8 +6,9 @@ from apt_analytics import (
     PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym,
     _same_month_last_year, analyze, area_distribution, build_kpi, cancel_rate_series,
     deal_type_stats, missing_regions, monthly_series, record_highs, reference_month,
-    complex_histories, floor_premium, jeonse_ratio, region_monthly, region_ranking,
-    summarize, umd_ranking,
+    anomaly_flags, complex_histories, floor_premium, jeonse_ratio, outside_agent_stats,
+    party_stats, region_monthly, region_ranking, settlement_series, summarize,
+    umd_ranking, week_anchor, weekly_series,
 )
 
 
@@ -476,6 +477,221 @@ class RegionMonthlyTest(unittest.TestCase):
         self.assertIn("region_monthly", out["broker"])
         self.assertEqual(out["region_monthly"]["regions"]["11680"]["count"], [4])
         self.assertEqual(out["broker"]["region_monthly"]["regions"]["11680"]["count"], [3])
+
+
+class SettlementTest(unittest.TestCase):
+    """등기완료율 - "최근 달은 잠정"을 규칙이 아니라 관측값으로 말하는 부분."""
+
+    def _rows(self, ym, n, registered, days=70):
+        out = []
+        for i in range(n):
+            r = rec(ym, 100)
+            if i < registered:
+                r["rgst_date"] = "2026-08-01"
+                r["days_to_rgst"] = days
+            out.append(r)
+        return out
+
+    def test_rate_is_share_of_registered(self):
+        out = settlement_series(self._rows("2026-06", 100, 40), ["2026-06"], min_rows=10)
+        m = out["months"][0]
+        self.assertEqual((m["total"], m["registered"], m["rate_pct"]), (100, 40, 40.0))
+
+    def test_thin_month_reports_no_rate(self):
+        out = settlement_series(self._rows("2026-06", 5, 5), ["2026-06"], min_rows=30)
+        self.assertIsNone(out["months"][0]["rate_pct"])
+
+    def test_median_days_withheld_while_month_is_immature(self):
+        # 완료율이 낮은 달의 소요일은 빨리 끝난 건만 보고 잰 값이라 늘 짧게 나온다.
+        # 실측으로 완료율 3.6%인 달이 "중위 2일"이었다. 그대로 내면 오독을 부른다.
+        out = settlement_series(self._rows("2026-08", 100, 4, days=2), ["2026-08"],
+                                min_rows=1, days_min_rate=80.0)
+        m = out["months"][0]
+        self.assertEqual(m["rate_pct"], 4.0)
+        self.assertTrue(m["days_biased"])
+        self.assertIsNone(m["median_days"])
+
+    def test_median_days_reported_once_month_is_settled(self):
+        out = settlement_series(self._rows("2026-01", 100, 95, days=70), ["2026-01"],
+                                min_rows=1)
+        m = out["months"][0]
+        self.assertFalse(m["days_biased"])
+        self.assertEqual(m["median_days"], 70)
+
+    def test_month_with_no_deals_is_still_a_row(self):
+        out = settlement_series([], ["2026-05", "2026-06"], min_rows=1)
+        self.assertEqual([m["ym"] for m in out["months"]], ["2026-05", "2026-06"])
+        self.assertEqual(out["months"][0]["total"], 0)
+
+
+class OutsideAgentTest(unittest.TestCase):
+    """외지 중개 비중 - 원정 매수의 대리 지표."""
+
+    def _rows(self, n, outside, code="11680"):
+        out = []
+        for i in range(n):
+            r = rec("2026-06", 100, code=code)
+            r["is_outside_agent"] = i < outside
+            out.append(r)
+        return out
+
+    def test_share_counts_only_judged_rows(self):
+        rows = self._rows(100, 20)
+        # 중개사 소재지가 없는 건(직거래 포함)은 분모에서 빠져야 한다.
+        for r in self._rows(100, 0):
+            r["is_outside_agent"] = None
+            rows.append(r)
+        out = outside_agent_stats(rows, ["2026-06"], min_rows=10)
+        self.assertEqual(out["overall_pct"], 20.0)
+        self.assertEqual(out["judged"], 100)
+
+    def test_thin_region_is_omitted_not_zeroed(self):
+        # 판정 가능 건이 적으면 비율을 내지 않는다. 0% 로 두면 "외지가 없는 동네"로 읽힌다.
+        out = outside_agent_stats(self._rows(5, 0), ["2026-06"], min_rows=200)
+        self.assertIsNone(out["overall_pct"])
+        self.assertEqual(out["regions"], [])
+
+    def test_regions_sorted_high_first(self):
+        rows = self._rows(100, 40) + self._rows(100, 5, code="41135")
+        out = outside_agent_stats(rows, ["2026-06"], min_rows=10)
+        self.assertEqual([r["outside_pct"] for r in out["regions"]], [40.0, 5.0])
+
+
+class PartyTest(unittest.TestCase):
+    def _rows(self, n, corp_sell=0, corp_buy=0):
+        out = []
+        for i in range(n):
+            r = rec("2026-06", 100)
+            r["seller"] = "법인" if i < corp_sell else "개인"
+            r["buyer"] = "법인" if i < corp_buy else "개인"
+            out.append(r)
+        return out
+
+    def test_seller_and_buyer_shares(self):
+        out = party_stats(self._rows(100, corp_sell=3, corp_buy=1), ["2026-06"], min_rows=10)
+        self.assertEqual(out["seller"]["법인"]["pct"], 3.0)
+        self.assertEqual(out["buyer"]["법인"]["pct"], 1.0)
+
+    def test_net_corp_sell_is_seller_minus_buyer(self):
+        out = party_stats(self._rows(100, corp_sell=5, corp_buy=2), ["2026-06"], min_rows=10)
+        self.assertEqual(out["regions"][0]["net_corp_sell_pct"], 3.0)
+
+    def test_thin_month_reports_none(self):
+        out = party_stats(self._rows(5, corp_sell=5), ["2026-06"], min_rows=200)
+        self.assertIsNone(out["monthly"][0]["seller_corp_pct"])
+
+    def test_missing_party_labelled_not_dropped(self):
+        rows = self._rows(2)
+        rows[0]["seller"] = None
+        out = party_stats(rows, ["2026-06"], min_rows=1)
+        self.assertIn("미상", out["seller"])
+
+
+class WeeklyTest(unittest.TestCase):
+    def test_groups_by_monday_of_contract_week(self):
+        # 2026-06-03 은 수요일 -> 그 주 월요일은 2026-06-01
+        rows = [deal("2026-06", 100000), deal("2026-06", 100000)]
+        for r in rows:
+            r["deal_date"] = "2026-06-03"
+        out = weekly_series(rows, weeks=2)
+        last = out["weeks"][-1]
+        self.assertEqual(last["week"], "2026-06-01")
+        self.assertEqual(last["count"], 2)
+
+    def test_last_weeks_marked_provisional(self):
+        rows = [dict(deal("2026-06", 100000), deal_date="2026-06-03")]
+        out = weekly_series(rows, weeks=10)
+        self.assertEqual(sum(1 for w in out["weeks"] if w["provisional"]), 5)
+        self.assertTrue(out["weeks"][-1]["provisional"])
+        self.assertFalse(out["weeks"][0]["provisional"])
+
+    def test_anchor_aligns_axes_across_groups(self):
+        # 시도별 시계열의 x축이 어긋나면 필터를 바꿀 때마다 축이 밀린다.
+        early = [dict(deal("2026-05", 100000), deal_date="2026-05-06")]
+        late = [dict(deal("2026-06", 100000), deal_date="2026-06-03")]
+        anchor = week_anchor(early + late)
+        a = weekly_series(early, weeks=8, anchor=anchor)
+        b = weekly_series(late, weeks=8, anchor=anchor)
+        self.assertEqual([w["week"] for w in a["weeks"]], [w["week"] for w in b["weeks"]])
+
+    def test_empty_input_is_safe(self):
+        self.assertEqual(weekly_series([], weeks=4)["weeks"], [])
+        self.assertIsNone(week_anchor([]))
+
+
+class AnomalyTest(unittest.TestCase):
+    def _peer(self, ym, n, amount, apt="가"):
+        return [deal(ym, amount, apt=apt) for _ in range(n)]
+
+    def test_needs_a_rare_anchor_signal(self):
+        # 직거래+법인매도만 겹친 건은 흔해서(실측 2,350건) 목록에 올리지 않는다.
+        rows = self._peer("2026-06", 6, 100000)
+        odd = deal("2026-06", 100000, apt="가", gbn="직거래")
+        odd["seller"] = "법인"
+        out = anomaly_flags(rows + [odd], ["2026-06"], min_peers=5)
+        self.assertEqual(out["total"], 0)
+
+    def test_deep_discount_with_direct_deal_is_listed(self):
+        rows = self._peer("2026-06", 6, 100000)
+        cheap = deal("2026-06", 50000, apt="가", gbn="직거래")   # 중위 대비 -50%
+        out = anomaly_flags(rows + [cheap], ["2026-06"], min_peers=5)
+        self.assertEqual(out["total"], 1)
+        self.assertEqual(sorted(out["rows"][0]["flags"]), ["시세괴리", "직거래"])
+        self.assertEqual(out["rows"][0]["gap_pct"], -50.0)
+
+    def test_small_discount_not_flagged(self):
+        rows = self._peer("2026-06", 6, 100000)
+        mild = deal("2026-06", 85000, apt="가", gbn="직거래")    # -15%, 문턱 30% 미만
+        self.assertEqual(anomaly_flags(rows + [mild], ["2026-06"], min_peers=5)["total"], 0)
+
+    def test_peer_median_needs_enough_neighbours(self):
+        # 이웃이 적으면 기준 자체가 그 몇 건에 좌우된다. 판정하지 않는다.
+        rows = self._peer("2026-06", 2, 100000)
+        cheap = deal("2026-06", 30000, apt="가", gbn="직거래")
+        self.assertEqual(anomaly_flags(rows + [cheap], ["2026-06"], min_peers=5)["total"], 0)
+
+    def test_old_deal_gets_no_price_verdict(self):
+        """시세 기준 창(6개월) 밖의 거래는 괴리를 판정하지 않는다.
+
+        그 사이 시장이 움직인 만큼이 통째로 "싸게 팔렸다"로 잡히기 때문이다.
+        """
+        months = [f"2025-{m:02d}" for m in range(7, 13)] + [f"2026-{m:02d}" for m in range(1, 7)]
+        rows = self._peer("2026-06", 6, 100000)
+        old = dict(deal("2025-07", 50000, apt="가", gbn="직거래"), seller="법인")
+        out = anomaly_flags(rows + [old], months, recent_months=6, scan_months=12,
+                            min_peers=5)
+        listed = [r for r in out["rows"] if r["deal_date"].startswith("2025-07")]
+        self.assertTrue(all(r["gap_pct"] is None for r in listed))
+
+    def test_flag_counts_split_all_versus_shown(self):
+        rows = self._peer("2026-06", 6, 100000)
+        for i in range(3):
+            rows.append(deal("2026-06", 40000, apt="가", gbn="직거래"))
+        out = anomaly_flags(rows, ["2026-06"], min_peers=5, top_n=1)
+        self.assertEqual(out["total"], 3)
+        self.assertEqual(len(out["rows"]), 1)
+        self.assertEqual(out["flag_counts"]["시세괴리"], 3)
+        self.assertEqual(out["shown_flag_counts"]["시세괴리"], 1)
+
+
+class NewFieldsInAnalyzeTest(unittest.TestCase):
+    def test_analyze_carries_every_new_section(self):
+        rows = [rec("2026-06", 100 + i) for i in range(40)]
+        out = analyze({"meta": {}, "records": rows})
+        for key in ("settlement", "outside_agent", "party", "weekly", "anomalies"):
+            self.assertIn(key, out, f"{key} 가 빠졌다")
+        self.assertIn("weekly", out["sido"][0], "시도별 주간 시계열이 빠졌다")
+
+    def test_region_rows_carry_outside_share(self):
+        rows = []
+        for i in range(300):
+            r = rec("2026-06", 100)
+            r["is_outside_agent"] = i < 30
+            rows.append(r)
+        out = analyze({"meta": {}, "records": rows})
+        row = out["regions"][0]
+        self.assertEqual(row["outside_pct"], 10.0)
+        self.assertEqual(row["outside_judged"], 300)
 
 
 if __name__ == "__main__":

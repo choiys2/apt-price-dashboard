@@ -137,6 +137,42 @@ def build(analytics, prev_state):
                          f"(같은 단지·타입 안에서 비교)")
         L.append("")
 
+    # --- 4b. 원본에만 있던 신호들 (등기일자·중개사 소재지·매도자 구분) ---
+    st, oa, pt, an = (analytics.get(k) for k in
+                      ("settlement", "outside_agent", "party", "anomalies"))
+    if any((st, oa, pt, an)):
+        L.append("## 신호")
+        L.append("")
+    if st and st.get("overall_median_days"):
+        settled = [x for x in st["months"] if x.get("rate_pct") is not None]
+        newest = settled[-1] if settled else None
+        L.append(f"- 등기까지 중위 **{st['overall_median_days']}일** "
+                 f"({st['p25_days']}~{st['p75_days']}일)"
+                 + (f" · 최신월 {newest['ym']} 등기완료율 **{newest['rate_pct']}%**"
+                    if newest else ""))
+        L.append("  (완료율이 낮은 달은 시장이 나빠서가 아니라 아직 등기할 시간이 "
+                 "안 지난 것이다. 시계열로 비교하면 안 된다)")
+    if oa and oa.get("overall_pct") is not None:
+        top = ", ".join(f"{x['region'].split()[-1]} {x['outside_pct']}%"
+                        for x in oa["regions"][:3])
+        L.append(f"- 외지 중개 비중 **{oa['overall_pct']}%** · 높은 곳: {top}")
+        L.append("  (매물 소재지와 중개사 소재지가 다른 거래. 원정 매수의 대리 지표일 뿐 "
+                 "매수자 주소가 아니다)")
+    if pt and pt.get("seller"):
+        s, b = pt["seller"].get("법인"), pt["buyer"].get("법인")
+        if s and b:
+            L.append(f"- 법인 매도 **{s['pct']}%** vs 매수 **{b['pct']}%** "
+                     f"(순매도 {round(s['pct'] - b['pct'], 2)}%p)")
+    if an and an.get("total"):
+        combos = " · ".join(f"{k} {v:,}건" for k, v in
+                            list(an.get("combo_counts", {}).items())[:3])
+        L.append(f"- 확인이 필요한 거래 **{an['total']:,}건** "
+                 f"({an['window'][0]}~{an['window'][-1]}): {combos}")
+        L.append("  (위법의 증거가 아니다. 신축 저층·특약·가족 간 거래·신고 오류가 "
+                 "모두 같은 신호를 낸다)")
+    if any((st, oa, pt, an)):
+        L.append("")
+
     # --- 5. 데이터 상태 ---
     L.append("## 데이터 상태")
     L.append("")
