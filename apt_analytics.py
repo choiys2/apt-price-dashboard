@@ -284,6 +284,50 @@ def complex_histories(records, keys, max_points=40):
     return out
 
 
+def complex_shards(records, months):
+    """시군구별 단지 x 전용타입 월별 궤적. 관심단지가 필요할 때만 내려받는 조각들.
+
+    전부 페이지에 심으면 안 되는 이유는 재봤다 - 조합이 31,910개고 15개월치를 다 실으면
+    2.8MB 가 는다. index.html 이 이미 1.7MB 라 첫 화면이 그만큼 느려진다. 반면 관심단지는
+    보통 서너 개고 한두 시군구에 몰려 있어서, 그 시군구 조각만 받아오면 20~30KB 로 끝난다.
+
+    조각을 받지 못해도(오프라인, file:// 로 연 경우) 관심단지 목록 자체는 페이지에 이미
+    실린 price_index 요약으로 돌아간다. 궤적 그래프만 빠진다.
+
+    행 형식은 [단지명, 전용타입, [[월인덱스, 중위거래가, 건수], ...]] 다. 키 이름을
+    3만 번 반복하지 않으려고 배열로 눕혔다.
+    """
+    by_region = defaultdict(lambda: defaultdict(list))
+    idx = {ym: i for i, ym in enumerate(months)}
+    for r in records:
+        atype = _area_type(r)
+        if not atype or not r.get("apt") or r.get("amount_manwon") is None:
+            continue
+        if r["deal_ym"] not in idx:
+            continue
+        by_region[r["lawd_cd"]][(r["apt"], atype)].append(r)
+
+    shards = {}
+    for code, groups in by_region.items():
+        rows = []
+        for (apt, atype), rs in groups.items():
+            by_month = defaultdict(list)
+            for r in rs:
+                by_month[idx[r["deal_ym"]]].append(r["amount_manwon"])
+            points = [[mi, round(median(v)), len(v)] for mi, v in sorted(by_month.items())]
+            rows.append([apt, atype, points])
+        rows.sort(key=lambda x: (x[0], x[1]))
+        shards[code] = {
+            "lawd_cd": code,
+            "region": region_name(code),
+            "months": months,
+            "columns": ["apt", "area_type", "points"],
+            "point_columns": ["month_index", "median_amount", "count"],
+            "rows": rows,
+        }
+    return shards
+
+
 def floor_premium(records, min_group=6, min_regions=1):
     """층 프리미엄. 반드시 단지 x 면적타입 **안에서** 비교한다.
 
@@ -340,19 +384,32 @@ def price_index(records, months, min_deals=3, recent_months=9):
       - 대표값은 중위다. 같은 단지·타입 안에서도 층·향 때문에 편차가 있다.
     """
     window = set(months[-recent_months:])
+    # 직전 창. "지금 얼마"만으로는 관심단지를 지켜볼 수가 없어서 "그때 대비 얼마"를 같이 낸다.
+    # 단지별 15개월 궤적을 통째로 실으면 1.8~2.8MB 라 페이지가 두 배가 되는데, 창 두 개를
+    # 비교하는 것으로 줄이면 약 180KB 로 끝난다. 실측으로 15,304개 중 67%가 양쪽 창에
+    # 모두 3건 이상이라 변화율이 나온다.
+    prior = set(months[:-recent_months])
     groups = defaultdict(list)
+    prev_groups = defaultdict(list)
+    umd_of = {}
     for r in records:
         atype = _area_type(r)
         if not atype or not r.get("apt") or r.get("amount_manwon") is None:
             continue
-        if r["deal_ym"] not in window:
-            continue
-        groups[(r["lawd_cd"], r["region"], r["apt"], atype)].append(r)
+        key = (r["lawd_cd"], r["region"], r["apt"], atype)
+        if r["deal_ym"] in window:
+            groups[key].append(r)
+            umd_of.setdefault(key, r.get("umd") or "")
+        elif r["deal_ym"] in prior:
+            prev_groups[key].append(r)
 
     # 13,000행에 딕셔너리 키 이름을 매번 싣으면 JSON 이 3MB 를 넘는다(키 이름만
     # 행당 110바이트). 배열로 눕히고 지역명은 코드->이름 표로 한 번만 싣는다.
     # 순서는 아래 COLUMNS 와 정확히 일치해야 한다.
     region_names = {}
+    # 법정동 이름도 행마다 문자열로 실으면 15,000행 x 10바이트가 그대로 붙는다.
+    # 이름은 1,000개 남짓이라 표로 한 번만 싣고 행에는 번호를 둔다.
+    umd_names, umd_idx = [], {}
     rows = []
     for (code, region, apt, atype), rs in groups.items():
         if len(rs) < min_deals:
@@ -360,18 +417,33 @@ def price_index(records, months, min_deals=3, recent_months=9):
         region_names[code] = region
         amts = sorted(r["amount_manwon"] for r in rs)
         ppps = [r["price_per_pyeong"] for r in rs if r.get("price_per_pyeong")]
+        umd = umd_of.get((code, region, apt, atype), "")
+        if umd not in umd_idx:
+            umd_idx[umd] = len(umd_names)
+            umd_names.append(umd)
+        prev = prev_groups.get((code, region, apt, atype), [])
+        # 직전 창도 min_deals 를 넘어야 비교값을 낸다. 한두 건짜리와 견주면
+        # "6개월 새 30% 올랐다" 같은 값이 그 한 건 때문에 나온다.
+        prev_med = (round(median([r["amount_manwon"] for r in prev]))
+                    if len(prev) >= min_deals else None)
         rows.append([
             code, apt, atype,
             round(median(amts)), amts[0], amts[-1],
             len(rs),
             round(median(ppps)) if ppps else None,
             rs[-1].get("build_year"),
+            umd_idx[umd],
+            prev_med,
+            len(prev),
         ])
     rows.sort(key=lambda r: r[3])
     return {
         "columns": ["lawd_cd", "apt", "area_type", "median_amount",
-                    "min_amount", "max_amount", "count", "median_ppp", "build_year"],
+                    "min_amount", "max_amount", "count", "median_ppp", "build_year",
+                    "umd", "prev_median", "prev_count"],
         "rows": rows,
+        "umd_names": umd_names,
+        "prior_window": [months[0], months[-recent_months - 1]] if prior else [],
         "region_names": region_names,
         "window": months[-recent_months:],
         "min_deals": min_deals,
@@ -517,6 +589,95 @@ def party_stats(records, months, min_rows=200):
     regions.sort(key=lambda r: r["net_corp_sell_pct"], reverse=True)
     return {"seller": split(records, "seller"), "buyer": split(records, "buyer"),
             "monthly": series, "regions": regions, "min_rows": min_rows}
+
+
+AGE_BUCKETS = [(0, 5), (5, 10), (10, 15), (15, 20), (20, 25), (25, 30), (30, 40), (40, 999)]
+REBUILD_AGE = 30          # 재건축 연한. 이 나이부터 "기대"가 값에 실린다고 본다
+
+
+def rebuild_premium(records, months, this_year=None, min_deals=3, min_complexes=8,
+                    min_base=3, top_n=60):
+    """재건축 기대 분해 - 낡았는데 비싼 단지를 같은 동네 안에서 골라낸다.
+
+    아파트값은 보통 나이가 들수록 내려간다. 실측으로 수도권 중위 평당가는 0~5년
+    2,762만원에서 25~30년 2,232만원까지 계속 떨어진다. 그런데 40년 이상에서 4,109만원
+    으로 되튄다. 이 반등이 건물값일 리는 없으니 재건축 기대가 값에 실린 것으로 본다.
+
+    측정 방법:
+      같은 법정동 안에서 30년 미만 단지들의 중위 평당가를 기준선으로 잡고, 30년 이상
+      단지가 그 기준선보다 얼마나 비싼지를 잰다. 동 단위로 비교하는 것이 핵심이다.
+      시군구로 묶으면 강남구 도곡동과 개포동이 한 기준선에 들어가, 재건축 기대가 아니라
+      동네 차이를 재게 된다.
+
+    한계 - 대지지분 데이터가 실거래가 API 에 없다. 재건축 기대의 크기는 결국 대지지분이
+    좌우하는데 그걸 못 보고 값의 잔차로만 추정한다. 그래서 이 값은 "재건축 가치"가 아니라
+    "같은 동네 새 아파트 대비 웃돈"이다. 학군·역세권처럼 나이와 무관한 이유로 비싼 노후
+    단지도 같이 올라온다.
+    """
+    year = this_year or date.today().year
+    window = set(months)
+    groups = defaultdict(list)
+    for r in records:
+        atype = _area_type(r)
+        if (not atype or not r.get("apt") or not r.get("build_year")
+                or not r.get("price_per_pyeong") or r["deal_ym"] not in window):
+            continue
+        groups[(r["lawd_cd"], r.get("umd") or "", r["apt"], atype)].append(r)
+
+    units = []
+    for (code, umd, apt, atype), rs in groups.items():
+        if len(rs) < min_deals:
+            continue
+        units.append({
+            "lawd_cd": code, "region": rs[0]["region"], "umd": umd, "apt": apt,
+            "area_type": atype, "age": year - rs[-1]["build_year"],
+            "build_year": rs[-1]["build_year"], "count": len(rs),
+            "median_ppp": round(median([r["price_per_pyeong"] for r in rs])),
+            "median_amount": round(median([r["amount_manwon"] for r in rs])),
+        })
+
+    # 수도권 전체 연식대 곡선. U자 반등을 화면에서 그대로 보여주려고 같이 낸다.
+    curve = []
+    for lo, hi in AGE_BUCKETS:
+        vals = [u["median_ppp"] for u in units if lo <= u["age"] < hi]
+        curve.append({"bucket": f"{lo}~{hi}년" if hi < 999 else f"{lo}년~",
+                      "lo": lo, "count": len(vals),
+                      "median_ppp": round(median(vals)) if vals else None})
+
+    by_umd = defaultdict(list)
+    for u in units:
+        by_umd[(u["lawd_cd"], u["umd"])].append(u)
+
+    rows, no_base = [], 0
+    for key, items in by_umd.items():
+        if len(items) < min_complexes:
+            continue
+        young = [u["median_ppp"] for u in items if u["age"] < REBUILD_AGE]
+        # 동 전체가 노후 단지면 기준선이 없다. 지어내지 않고 건너뛴다.
+        if len(young) < min_base:
+            no_base += 1
+            continue
+        base = median(young)
+        if not base:
+            continue
+        for u in items:
+            if u["age"] < REBUILD_AGE:
+                continue
+            rows.append({**u, "base_ppp": round(base),
+                         "premium_pct": round((u["median_ppp"] - base) / base * 100, 1)})
+    rows.sort(key=lambda r: r["premium_pct"], reverse=True)
+    prems = [r["premium_pct"] for r in rows]
+    return {
+        "curve": curve,
+        "rows": rows[:top_n],
+        "total": len(rows),
+        "median_pct": round(median(prems), 1) if prems else None,
+        "p25_pct": round(quantiles(prems, n=4)[0], 1) if len(prems) >= 4 else None,
+        "p75_pct": round(quantiles(prems, n=4)[2], 1) if len(prems) >= 4 else None,
+        "over30_count": sum(1 for p in prems if p > 30),
+        "rebuild_age": REBUILD_AGE, "min_complexes": min_complexes,
+        "min_deals": min_deals, "skipped_no_base": no_base, "this_year": year,
+    }
 
 
 def week_anchor(records):
@@ -852,6 +1013,9 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
         "outside_agent": outside_agent_stats(records, months),
         "party": party_stats(records, months),
         "anomalies": anomaly_flags(records, months),
+        # 재건축 기대는 직거래를 빼고 본다. 시세보다 28.5% 낮게 신고되는 건들이 섞이면
+        # 노후 단지의 웃돈이 실제보다 작게 나온다.
+        "rebuild": rebuild_premium(broker or records, months),
     }
     rh = record_highs(records, months)
     result["record_highs"] = rh
@@ -867,6 +1031,13 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
     # 예산 역질의용 시세 인덱스. 직거래는 시세보다 28.5% 낮게 신고되는 경우가 많아
     # "이 값이면 살 수 있다"는 표에 섞으면 안 된다.
     result["price_index"] = price_index(broker or records, months)
+    # 관심단지 궤적은 시군구별 조각으로 따로 나간다. 여기에는 어느 시군구 조각이
+    # 있는지와 어디서 받아오는지만 싣는다.
+    result["history_index"] = {
+        "path": "history/{lawd_cd}.json",
+        "months": months,
+        "regions": sorted({r["lawd_cd"] for r in records}),
+    }
 
     if rent_payload:
         rr = rent_payload.get("records", [])

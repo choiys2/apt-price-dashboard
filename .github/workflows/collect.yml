@@ -75,10 +75,15 @@ jobs:
             git pull --rebase origin main || true
           done
 
+      # index.html 과 함께 관심단지 궤적 조각(live/history/)도 올린다. 조각은 페이지에
+      # 심지 않고 필요할 때 받아가는 구조라, 같이 배포되지 않으면 궤적 그래프만 조용히
+      # 슬로프로 떨어진다. 두 경로의 공통 조상이 live/ 라 아티팩트 루트가 live/ 가 된다.
       - name: 대시보드 아티팩트 업로드
         if: steps.pipeline.outputs.healthy == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: site
-          path: live/index.html
+          path: |
+            live/index.html
+            live/history
           retention-days: 1

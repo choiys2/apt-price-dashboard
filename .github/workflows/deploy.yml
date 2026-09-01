@@ -60,6 +60,11 @@ jobs:
         run: |
           test -s _site/index.html
           echo "대시보드 $(stat -c%s _site/index.html) 바이트"
+          # 궤적 조각이 빠져도 관심단지 목록은 돌아가고 그래프만 슬로프로 떨어진다.
+          # 배포를 막을 일은 아니지만 조용히 넘어가지는 않게 로그에 남긴다.
+          n=$(find _site/history -name '*.json' 2>/dev/null | wc -l)
+          echo "관심단지 궤적 조각 ${n}개"
+          [ "$n" -gt 0 ] || echo "::warning::history 조각이 없다. 궤적이 슬로프로 대체된다."
 
       - uses: actions/upload-pages-artifact@v3
         with:

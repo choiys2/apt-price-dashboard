@@ -135,6 +135,23 @@ def main():
     print(f"  -> {analytics_path}: {k['period_from']}~{k['period_to']}, "
           f"중위 평당가 {k['median_ppp']:,}만원")
 
+    # 관심단지 궤적: 시군구별 조각으로 떨궈 필요할 때만 받아가게 한다.
+    # 페이지에 다 심으면 2.8MB 가 늘어난다(조합 31,910개 x 15개월).
+    from apt_analytics import complex_shards
+    records = [r for r in full["records"] if not r.get("canceled")]
+    months = sorted({r["deal_ym"] for r in records})
+    hist_dir = os.path.join(args.out_dir, "history")
+    os.makedirs(hist_dir, exist_ok=True)
+    shards = complex_shards(records, months)
+    total_kb = 0
+    for code, payload in shards.items():
+        p = os.path.join(hist_dir, f"{code}.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+        total_kb += os.path.getsize(p) / 1024
+    print(f"  -> {hist_dir}: 시군구 {len(shards)}개 조각, 합계 {total_kb:,.0f}KB "
+          f"(평균 {total_kb/max(len(shards),1):.0f}KB, 필요할 때만 내려받는다)")
+
     print("[3/3] 대시보드 생성")
     geo = load_boundaries(args.boundaries)
     if geo is None:

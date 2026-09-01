@@ -142,6 +142,42 @@ html[data-theme="light"] .maplabel{stroke:rgba(255,255,255,.8)}
 .rankbar .rf{height:100%;border-radius:4px}
 .rankbar .rv{text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)}
 .ranklist{max-height:452px;overflow-y:auto;padding-right:4px}
+/* --- 관심단지 --- */
+.star{cursor:pointer;font-size:15px;line-height:1;padding:2px 5px;border-radius:6px;
+  color:var(--line);transition:color .12s,background .12s;background:none;border:none}
+.star:hover{background:var(--panel-2);color:var(--muted)}
+.star[aria-pressed="true"]{color:#f5c451}
+.star[aria-pressed="true"]:hover{color:#f5c451}
+.wcard{border:1px solid var(--line);border-radius:11px;padding:14px 16px;background:var(--panel-2);
+  display:grid;grid-template-columns:1fr auto;gap:10px;align-items:start}
+.wgrid{display:grid;gap:12px}
+.wcard .wname{font-weight:640;font-size:15px;letter-spacing:-.01em}
+.wcard .wloc{color:var(--muted);font-size:12.5px;margin-top:1px}
+.wcard .wnums{margin-top:9px;display:flex;gap:16px;flex-wrap:wrap;font-size:13px;
+  font-variant-numeric:tabular-nums}
+.wcard .wnums b{font-size:15px}
+.wcard .wact{display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.tag{display:inline-block;font-size:11.5px;padding:2px 8px;border-radius:999px;
+  border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.tag.hit{border-color:#f5c451;color:#f5c451}
+.tag.up{border-color:var(--up);color:var(--up)}
+.tag.down{border-color:var(--down);color:var(--down)}
+.wtarget{width:104px;text-align:right;background:var(--panel);border:1px solid var(--line);
+  color:var(--text);border-radius:7px;padding:4px 8px;font:inherit;font-size:12.5px;
+  font-variant-numeric:tabular-nums}
+.wtarget:focus{outline:none;border-color:var(--accent)}
+.searchbox{position:relative}
+.sresults{position:absolute;z-index:5;left:0;right:0;top:calc(100% + 6px);max-height:340px;
+  overflow-y:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  box-shadow:var(--shadow)}
+.sresults:empty{display:none}
+.sitem{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;
+  padding:9px 12px;border-bottom:1px solid var(--line);font-size:13.5px}
+.sitem:last-child{border-bottom:none}
+.sitem:hover{background:var(--panel-2)}
+.sitem .sloc{color:var(--muted);font-size:12px}
+.sitem .sval{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.empty{color:var(--muted);text-align:center;padding:34px 12px;font-size:13.5px}
 /* --- 테이블 --- */
 .table-head{display:flex;justify-content:space-between;align-items:center;
   gap:12px;flex-wrap:wrap;margin-bottom:12px}
@@ -218,6 +254,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
 <nav class="tabs" id="tabs" role="tablist">
   <button class="tab" role="tab" data-tab="overview" aria-selected="true">개요</button>
   <button class="tab" role="tab" data-tab="map" aria-selected="false">입체 지도<span class="badge">3D</span></button>
+  <button class="tab" role="tab" data-tab="watch" aria-selected="false">관심단지<span class="badge" id="tab-watch-n"></span></button>
 </nav>
 
 <div class="filters" id="filters"></div>
@@ -316,6 +353,26 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <div class="dist wide" id="party"></div>
   <div id="party-chart" style="margin-top:16px"></div>
   <p class="sub" id="party-foot" style="margin-top:10px"></p>
+</section>
+
+<section class="card" id="rebuild-card" style="display:none">
+  <h2>재건축 기대 분해</h2>
+  <p class="sub" id="rebuild-note" style="margin:0 0 14px"></p>
+  <div class="dist" id="rebuild-curve"></div>
+  <div class="table-head" style="margin:20px 0 8px">
+    <h2 style="margin:0;font-size:14px">같은 법정동 새 아파트 대비 웃돈이 큰 노후 단지</h2>
+  </div>
+  <div class="scroll tall"><table class="rh">
+    <thead><tr>
+      <th style="cursor:default"></th><th style="cursor:default">지역</th>
+      <th style="cursor:default">단지</th><th style="cursor:default">전용</th>
+      <th style="cursor:default">준공</th><th style="cursor:default">평당가</th>
+      <th style="cursor:default">동네 기준</th><th style="cursor:default">웃돈</th>
+      <th style="cursor:default">거래</th>
+    </tr></thead>
+    <tbody id="rebuild-body"></tbody>
+  </table></div>
+  <p class="sub" id="rebuild-warn" style="margin-top:12px"></p>
 </section>
 
 <section class="card" id="anom-card" style="display:none">
@@ -432,6 +489,43 @@ footer ul{padding-left:18px;margin:8px 0 0}
 
 </div><!-- /pane-map -->
 
+<!-- ===================== 관심단지 ===================== -->
+<div id="pane-watch" hidden>
+
+<section class="card">
+  <h2>단지 담기</h2>
+  <p class="sub" style="margin:0 0 12px">단지 이름이나 지역으로 찾아 ★ 를 누르면 담긴다.
+    담은 목록은 <b>이 브라우저에</b> 저장되고 서버로 나가지 않는다.</p>
+  <div class="searchbox">
+    <input type="search" id="w-search" placeholder="단지 이름 · 지역 · 법정동 (예: 은마, 목동, 분당)"
+           style="width:100%;min-width:0" autocomplete="off">
+    <div class="sresults" id="w-results"></div>
+  </div>
+  <p class="sub" id="w-searchnote" style="margin-top:10px"></p>
+</section>
+
+<section class="card">
+  <div class="table-head">
+    <h2 style="margin:0">담은 단지</h2>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="ghost" id="w-export">주소로 내보내기</button>
+      <button class="ghost" id="w-json">watchlist.json 복사</button>
+      <button class="ghost" id="w-clear">전체 비우기</button>
+    </div>
+  </div>
+  <div id="w-change"></div>
+  <div class="wgrid" id="w-list"></div>
+  <p class="sub" id="w-foot" style="margin-top:14px"></p>
+</section>
+
+<section class="card" id="w-slope-card" style="display:none">
+  <h2>담은 단지 비교</h2>
+  <p class="sub" id="w-slope-note" style="margin:0 0 12px"></p>
+  <div id="w-slope"></div>
+</section>
+
+</div><!-- /pane-watch -->
+
 <footer>
   <div><b>출처</b> 국토교통부 아파트 매매 실거래가 (data.go.kr, RTMSDataSvcAptTrade)</div>
   <ul>
@@ -523,8 +617,10 @@ function switchTab(name){
     b.setAttribute('aria-selected', String(b.dataset.tab === name)));
   $('#pane-overview').hidden = name !== 'overview';
   if ($('#pane-map')) $('#pane-map').hidden = name !== 'map';
+  $('#pane-watch').hidden = name !== 'watch';
   // 지도는 숨겨진 동안 그려도 소용없다. 보이는 시점에 그린다.
   if (name === 'map') renderMap();
+  if (name === 'watch') renderWatchList();
 }
 
 /* ---------- 필터 ---------- */
@@ -1059,7 +1155,8 @@ function renderBudget(){
     : '<span class="muted">조건에 맞는 단지가 없다. 예산을 올리거나 면적을 낮춰볼 것.</span>';
 
   $('#b-body').innerHTML = hits.slice(0, 100).map(r => `<tr>
-      <td>${esc(names[r[c.lawd_cd]] || '')}</td>
+      <td style="text-align:left">${starHtml(rowKey(r))}
+        ${esc(shortName(names[r[c.lawd_cd]] || ''))}</td>
       <td class="name">${esc(r[c.apt])}</td>
       <td>${r[c.area_type]}㎡</td>
       <td>${r[c.build_year] ?? '–'}</td>
@@ -1068,6 +1165,7 @@ function renderBudget(){
       <td>${nf(r[c.median_ppp])}</td>
       <td>${r[c.count]}건</td>
     </tr>`).join('');
+  bindStars($('#b-body'));
   $('#b-note').textContent =
     `${PI.window[0]}~${PI.window[PI.window.length-1]} 중개거래 ${PI.min_deals}건 이상인 `
     + `단지×전용타입 ${nf(PI.rows.length)}개가 대상이다. 전용면적이 넓은 순으로 상위 100개만 표시한다. `
@@ -1084,6 +1182,530 @@ function syncBudgetInputs(from){
     if (v > 0) BST[key] = v;
     if ($(dst)) $(dst).value = BST[key];
   }
+}
+
+/* ================================================================
+   관심단지
+
+   서버가 없다. 저장은 세 층으로 나눈다.
+     1층 localStorage  - 기본. 로그인 없이 바로 쓰지만 브라우저마다 따로 논다.
+     2층 주소 해시     - 폰과 PC 사이를 옮기거나 남에게 넘길 때.
+     3층 watchlist.json - 저장소에 커밋하면 주간 브리핑이 읽는다. 서버 쪽에서
+                          도는 유일한 길이라, 열지 않아도 소식이 오게 하려면 이것뿐이다.
+   ================================================================ */
+const WKEY = 'apt-watch';
+const PI_INDEX = (() => {          // "코드|단지|타입" -> price_index 행
+  const m = {};
+  if (PI) for (const r of PI.rows) m[`${r[PIC.lawd_cd]}|${r[PIC.apt]}|${r[PIC.area_type]}`] = r;
+  return m;
+})();
+const rowKey = r => `${r[PIC.lawd_cd]}|${r[PIC.apt]}|${r[PIC.area_type]}`;
+const umdOf = r => (PI.umd_names || [])[r[PIC.umd]] || '';
+
+// localStorage 는 사생활 보호 모드나 저장 차단 설정에서 통째로 던진다. 관심단지를
+// 못 쓰는 것과 페이지가 죽는 것은 다른 문제라, 읽기·쓰기를 모두 감싼다.
+function loadWatch(){
+  try {
+    const raw = localStorage.getItem(WKEY);
+    const w = raw ? JSON.parse(raw) : null;
+    if (w && w.items) return w;
+  } catch (e){ /* 저장소를 못 쓰는 브라우저 - 이번 방문에만 담긴다 */ }
+  return {v:1, items:{}, snap:null};
+}
+let WATCH = loadWatch();
+function saveWatch(){
+  try { localStorage.setItem(WKEY, JSON.stringify(WATCH)); }
+  catch (e){ /* 저장이 막혀도 화면은 그대로 돌아야 한다 */ }
+  renderWatchBadge();
+}
+const isWatched = k => !!WATCH.items[k];
+function toggleWatch(k){
+  if (WATCH.items[k]) delete WATCH.items[k];
+  else WATCH.items[k] = {target:null, added:D.meta.analyzed_at};
+  saveWatch();
+  renderWatchAll();
+  document.querySelectorAll(`.star[data-k="${cssEsc(k)}"]`)
+    .forEach(b => b.setAttribute('aria-pressed', String(isWatched(k))));
+  if (tab === 'map') renderMap();
+}
+// data-k 에 단지명이 그대로 들어가 따옴표가 섞일 수 있다.
+const cssEsc = s => String(s).replace(/["\\]/g, '\\$&');
+const starHtml = k => `<button class="star" data-k="${esc(k)}" aria-pressed="${isWatched(k)}"`
+  + ` title="관심단지에 담기">${isWatched(k) ? '★' : '☆'}</button>`;
+function bindStars(root){
+  (root || document).querySelectorAll('.star').forEach(b => b.onclick = ev => {
+    ev.stopPropagation();
+    const k = b.dataset.k;
+    toggleWatch(k);
+    b.textContent = isWatched(k) ? '★' : '☆';
+  });
+}
+function renderWatchBadge(){
+  const n = Object.keys(WATCH.items).length;
+  $('#tab-watch-n').textContent = n ? String(n) : '';
+}
+
+/* --- 검색 --- */
+function renderSearch(){
+  const q = $('#w-search').value.trim();
+  const box = $('#w-results');
+  if (!PI || q.length < 1){ box.innerHTML = ''; return; }
+  const names = PI.region_names;
+  const hit = [];
+  for (const r of PI.rows){
+    const reg = names[r[PIC.lawd_cd]] || '';
+    const apt = r[PIC.apt];
+    // 이름이 맞는 것이 지역만 맞는 것보다 위여야 하고, 이름 안에서도 앞에서
+    // 시작하는 것이 먼저다. 거래량만으로 줄을 세우면 "은마"를 쳤을 때
+    // "동탄시범다은마을"이 거래가 많다는 이유로 위에 올라온다.
+    let rank = -1;
+    if (apt.startsWith(q)) rank = 0;
+    else if (apt.includes(q)) rank = 1;
+    else if (umdOf(r).includes(q)) rank = 2;
+    else if (reg.includes(q)) rank = 3;
+    if (rank >= 0){
+      hit.push([rank, r]);
+      if (hit.length >= 800) break;
+    }
+  }
+  hit.sort((a,b) => a[0] - b[0] || b[1][PIC.count] - a[1][PIC.count]);
+  box.innerHTML = hit.slice(0, 40).map(([, r]) => {
+    const k = rowKey(r);
+    return `<div class="sitem">${starHtml(k)}
+      <div><b>${esc(r[PIC.apt])}</b> <span class="muted">${r[PIC.area_type]}㎡</span>
+        <div class="sloc">${esc(shortName(names[r[PIC.lawd_cd]] || ''))} ${esc(umdOf(r))}
+          · 준공 ${r[PIC.build_year] ?? '–'} · 거래 ${r[PIC.count]}건</div></div>
+      <div class="sval"><b>${fmtAmount(r[PIC.median_amount])}</b></div>
+    </div>`;
+  }).join('') || `<div class="empty">찾는 단지가 없다</div>`;
+  bindStars(box);
+  $('#w-searchnote').textContent = hit.length
+    ? `${nf(hit.length)}${hit.length >= 400 ? '개 이상' : '개'} 일치 · 거래 많은 순 상위 40개 표시`
+    : '';
+}
+
+/* --- 담은 목록 --- */
+function watchRows(){
+  return Object.keys(WATCH.items).map(k => ({k, row: PI_INDEX[k], meta: WATCH.items[k]}));
+}
+function changePct(r){
+  const prev = r[PIC.prev_median];
+  return prev ? (r[PIC.median_amount] - prev) / prev * 100 : null;
+}
+
+function renderWatchList(){
+  const rows = watchRows();
+  const list = $('#w-list');
+  if (!rows.length){
+    list.innerHTML = `<div class="empty">아직 담은 단지가 없다.
+      위에서 이름으로 찾거나, 개요 탭의 예산·신고가·재건축 표에서 ★ 를 누르면 담긴다.</div>`;
+    $('#w-foot').textContent = '';
+    $('#w-slope-card').style.display = 'none';
+    return;
+  }
+  const names = PI.region_names;
+  list.innerHTML = rows.map(({k, row, meta}) => {
+    if (!row){
+      // 단지가 사라지는 경우가 실제로 있다 - 최근 9개월 거래가 3건 미만으로 줄면
+      // 시세표에서 빠진다. 조용히 지우지 않고 왜 값이 없는지 말해준다.
+      const [code, apt, at] = k.split('|');
+      return `<div class="wcard"><div>
+          <div class="wname">${esc(apt)} <span class="muted">${esc(at)}㎡</span></div>
+          <div class="wloc">${esc(shortName(names[code] || code))}</div>
+          <div class="wnums"><span class="muted">최근 거래가 ${PI.min_deals}건에 못 미쳐
+            이번 집계의 시세표에 없다</span></div>
+        </div>
+        <div class="wact">${starHtml(k)}</div></div>`;
+    }
+    const ch = changePct(row);
+    const tgt = meta.target;
+    const hit = tgt && row[PIC.median_amount] <= tgt;
+    return `<div class="wcard"><div>
+        <div class="wname">${esc(row[PIC.apt])} <span class="muted">${row[PIC.area_type]}㎡</span></div>
+        <div class="wloc">${esc(shortName(names[row[PIC.lawd_cd]] || ''))} ${esc(umdOf(row))}
+          · 준공 ${row[PIC.build_year] ?? '–'}</div>
+        <div class="wnums">
+          <span>시세 <b>${fmtAmount(row[PIC.median_amount])}</b></span>
+          <span class="muted">범위 ${fmtAmount(row[PIC.min_amount])}~${fmtAmount(row[PIC.max_amount])}</span>
+          <span class="muted">평당 ${nf(row[PIC.median_ppp])}만</span>
+          <span class="muted">거래 ${row[PIC.count]}건</span>
+          <span>직전 대비 ${ch == null
+            ? '<span class="muted">–</span>' : pct(ch)}</span>
+        </div>
+      </div>
+      <div class="wact">
+        ${starHtml(k)}
+        <label class="muted" style="font-size:11.5px">목표가
+          <input type="number" class="wtarget" data-k="${esc(k)}" step="1000" min="0"
+                 placeholder="만원" value="${tgt ?? ''}"></label>
+        ${hit ? '<span class="tag hit">목표가 도달</span>' : ''}
+      </div></div>`;
+  }).join('');
+  bindStars(list);
+  list.querySelectorAll('.wtarget').forEach(inp => inp.onchange = () => {
+    const v = +inp.value;
+    WATCH.items[inp.dataset.k].target = v > 0 ? v : null;
+    saveWatch(); renderWatchList();
+  });
+  const withCh = rows.filter(r => r.row && changePct(r.row) != null);
+  $('#w-foot').innerHTML =
+    `${rows.length}개 담김 · 시세는 ${PI.window[0]}~${PI.window[PI.window.length-1]} 중개거래 `
+    + `${PI.min_deals}건 이상의 중위 거래가다. `
+    + (PI.prior_window && PI.prior_window.length
+        ? `"직전 대비"는 ${PI.prior_window[0]}~${PI.prior_window[1]} 창과 견준 값이고, `
+          + `그 창에도 ${PI.min_deals}건 이상 있어야 나온다(${withCh.length}/${rows.length}개). `
+        : '')
+    + `<span class="muted">담은 목록은 이 브라우저에만 저장된다. 캐시를 지우면 사라지니 `
+    + `"주소로 내보내기"로 백업해 둘 것.</span>`;
+  renderSlope(rows);
+}
+
+/* --- 지난 방문 이후 무엇이 달라졌나 ---
+   푸시 알림은 정적 사이트에서 불가능하다. 대신 방문할 때마다 시세 스냅샷을 남겨두고,
+   다음에 열었을 때 그 사이의 차이만 보여준다. "열었을 때 무엇이 달라졌는지"는
+   이 방식으로 정확히 말할 수 있다. */
+function renderWatchChange(){
+  const box = $('#w-change');
+  const rows = watchRows().filter(r => r.row);
+  const snap = WATCH.snap;
+  const now = {};
+  for (const {k, row} of rows) now[k] = [row[PIC.median_amount], row[PIC.count]];
+
+  if (!rows.length){ box.innerHTML = ''; }
+  else if (!snap || snap.at === D.meta.analyzed_at){
+    box.innerHTML = snap
+      ? `<p class="sub" style="margin:0 0 14px">집계일 ${esc(D.meta.analyzed_at)} 기준이다.
+          다음 갱신 때 이 자리에 달라진 것만 모아 보여준다.</p>`
+      : `<p class="sub" style="margin:0 0 14px">이번 방문의 시세를 기록해 뒀다.
+          다음에 열면 그 사이 달라진 것만 여기에 모인다.</p>`;
+  } else {
+    const diffs = [];
+    for (const {k, row} of rows){
+      const was = snap.data[k];
+      if (!was) continue;
+      const dm = row[PIC.median_amount] - was[0], dc = row[PIC.count] - was[1];
+      if (!dm && dc <= 0) continue;
+      diffs.push({name: `${row[PIC.apt]} ${row[PIC.area_type]}㎡`, dm, dc,
+                  pctv: was[0] ? dm / was[0] * 100 : null});
+    }
+    diffs.sort((a,b) => Math.abs(b.pctv || 0) - Math.abs(a.pctv || 0));
+    box.innerHTML = diffs.length
+      ? `<div class="card" style="background:var(--panel-2);margin-bottom:16px">
+          <div class="label" style="color:var(--muted);font-size:12.5px">
+            지난 방문(${esc(snap.at)} 집계) 이후 달라진 것</div>
+          <div style="margin-top:8px;display:grid;gap:6px;font-size:13.5px">
+            ${diffs.slice(0,12).map(d => `<div>${esc(d.name)} —
+              ${d.dm ? `시세 <b>${d.dm > 0 ? '+' : '−'}${fmtAmount(Math.abs(d.dm))}</b>
+                        ${d.pctv == null ? '' : pct(d.pctv)}` : ''}
+              ${d.dc > 0 ? `<span class="muted">새 거래 ${d.dc}건</span>` : ''}</div>`).join('')}
+          </div></div>`
+      : `<p class="sub" style="margin:0 0 14px">지난 방문(${esc(snap.at)} 집계) 이후
+          담은 단지의 시세와 거래건수에 변화가 없다.</p>`;
+  }
+  // 스냅샷은 집계일이 바뀌었을 때만 통째로 갱신한다. 같은 집계를 두 번 열었다고
+  // 기준점이 밀리면 "그 사이 달라진 것"을 영영 못 보게 된다.
+  if (!rows.length) return;
+  if (!snap || snap.at !== D.meta.analyzed_at){
+    WATCH.snap = {at: D.meta.analyzed_at, data: now};
+    saveWatch();
+    return;
+  }
+  // 다만 방금 담은 단지는 기준점을 지금 채워 넣어야 한다. 기존 항목의 기준만
+  // 지키고 새 항목을 빠뜨리면, 담은 뒤 처음 맞는 갱신에서 그 단지만 비교 대상이
+  // 없어 "달라진 것"에서 조용히 빠진다. 실측으로 두 개를 담았는데 먼저 담은
+  // 하나만 변화가 잡혔다. 담기를 끊은 단지의 기준점은 같이 지운다.
+  let dirty = false;
+  for (const k of Object.keys(now))
+    if (!(k in snap.data)){ snap.data[k] = now[k]; dirty = true; }
+  for (const k of Object.keys(snap.data))
+    if (!(k in now)){ delete snap.data[k]; dirty = true; }
+  if (dirty) saveWatch();
+}
+
+/* --- 비교: 직전 창 -> 최근 창 기울기 ---
+   단지별 월간 궤적을 다 실으면 페이지가 두 배가 된다(실측 1.8~2.8MB). 창 두 개만
+   있으므로 꺾은선 대신 기울기 그래프로 그린다. 점이 두 개뿐이라는 사실을 숨기지 않는
+   형태이고, 절대가가 달라도 어느 쪽이 더 올랐는지는 그대로 읽힌다. */
+/* --- 월간 궤적 조각 -------------------------------------------------
+   단지별 월간 궤적을 페이지에 다 실으면 2.8MB 가 는다(조합 31,910개 x 15개월).
+   index.html 이 이미 1.7MB 라 첫 화면이 그만큼 느려지는데, 정작 그 데이터를 보는
+   사람은 관심단지를 담은 사람뿐이고 그것도 한두 시군구에 몰린다. 그래서 시군구별로
+   쪼개 두고 담은 단지가 있는 곳만 그때 받아온다(시군구당 평균 33KB).
+
+   못 받아와도(오프라인, file:// 로 연 경우, 조각 배포 실패) 목록과 슬로프 그래프는
+   그대로 돌아간다. 궤적만 빠진다. 조각을 못 받았다는 이유로 관심단지 자체가
+   망가지면 안 된다.                                                              */
+const SHARDS = {};                 // lawd -> {rows:[...], months:[...]} | 'fail'
+let shardSeq = 0;
+async function ensureShards(lawds){
+  const hi = D.history_index;
+  if (!hi) return false;
+  const want = [...new Set(lawds)].filter(l => !(l in SHARDS));
+  if (!want.length) return false;
+  const mine = ++shardSeq;
+  await Promise.all(want.map(async l => {
+    try {
+      const res = await fetch(hi.path.replace('{lawd_cd}', l), {cache: 'no-cache'});
+      if (!res.ok) throw new Error(res.status);
+      SHARDS[l] = await res.json();
+    } catch (e){
+      SHARDS[l] = 'fail';
+    }
+  }));
+  return mine === shardSeq;       // 그 사이 목록이 또 바뀌었으면 이 결과는 버린다
+}
+
+// 담은 단지의 월간 궤적. 조각이 없으면 null.
+function trackOf(k){
+  const [lawd, apt, at] = k.split('|');
+  const sh = SHARDS[lawd];
+  if (!sh || sh === 'fail') return null;
+  const hit = sh.rows.find(r => r[0] === apt && String(r[1]) === at);
+  return hit ? {months: sh.months, points: hit[2]} : null;
+}
+
+function renderWatchTrack(rows){
+  const items = [];
+  for (const {k, row} of rows){
+    if (!row) continue;
+    const t = trackOf(k);
+    if (t && t.points.length >= 2)
+      items.push({name: `${row[PIC.apt]} ${row[PIC.area_type]}㎡`, ...t});
+  }
+  if (items.length < 1) return false;
+
+  const months = items[0].months;
+  const W = 860, H = 340, ml = 46, mr = 168, mt = 18, mb = 40;
+  const iw = W-ml-mr, ih = H-mt-mb;
+  // 절대가가 10배 차이나면 같은 축에서 기울기가 안 보인다. 각자 첫 관측을 100 으로 둔다.
+  const series = items.map(it => {
+    const base = it.points[0][1];
+    return {name: it.name,
+            pts: it.points.map(([mi, amt, n]) => [mi, amt / base * 100, amt, n]),
+            last: it.points[it.points.length-1][1] / base * 100};
+  });
+  const vals = series.flatMap(s => s.pts.map(p => p[1]));
+  const lo = Math.min(...vals, 100), hi = Math.max(...vals, 100);
+  const pad = Math.max((hi-lo)*0.12, 2);
+  const x = mi => ml + (iw/Math.max(months.length-1,1))*mi;
+  const y = v => mt + ih - ((v-(lo-pad))/((hi+pad)-(lo-pad) || 1))*ih;
+  const COLORS = ['#4b8ef7','#f0715f','#3fbf9f','#f3c53c','#a879e6','#4aa3e0','#f0873a','#7fc96a'];
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="담은 단지 월간 시세 궤적">`;
+  for (let t = 0; t <= 4; t++){
+    const v = (lo-pad) + ((hi+pad)-(lo-pad))*t/4;
+    svg += `<line class="gridline" x1="${ml}" y1="${y(v)}" x2="${ml+iw}" y2="${y(v)}"/>`
+        +  `<text class="axis-text" x="${ml-8}" y="${y(v)+4}" text-anchor="end">${v.toFixed(0)}</text>`;
+  }
+  svg += `<line x1="${ml}" y1="${y(100)}" x2="${ml+iw}" y2="${y(100)}" stroke="var(--muted)"`
+      +  ` stroke-dasharray="4 4" opacity=".5"/>`;
+  // 겹치는 라벨을 아래로 밀어 서로 안 가리게 한다.
+  const placed = [];
+  series.forEach((s, i) => {
+    const col = COLORS[i % COLORS.length];
+    const d = s.pts.map((p, j) => (j ? 'L' : 'M') + x(p[0]).toFixed(1) + ' ' + y(p[1]).toFixed(1)).join(' ');
+    svg += `<path d="${d}" fill="none" stroke="${col}" stroke-width="2" stroke-linejoin="round"/>`;
+    svg += s.pts.map(p => `<circle cx="${x(p[0]).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="2.8"`
+        + ` fill="${col}"><title>${esc(months[p[0]])} ${fmtAmount(p[2])} (${p[3]}건)</title></circle>`).join('');
+    const lastPt = s.pts[s.pts.length-1];
+    let ly = y(lastPt[1]);
+    while (placed.some(v => Math.abs(v - ly) < 13)) ly += 13;
+    placed.push(ly);
+    svg += `<text class="axis-text" x="${ml+iw+8}" y="${ly+4}" fill="${col}">`
+        +  `${esc(s.name)} ${s.last >= 100 ? '+' : ''}${(s.last-100).toFixed(1)}%</text>`;
+  });
+  const step = Math.ceil(months.length/8);
+  months.forEach((m, i) => { if (i % step && i !== months.length-1) return;
+    svg += `<text class="axis-text" x="${x(i)}" y="${mt+ih+18}" text-anchor="middle">${m.slice(2)}</text>`; });
+  svg += '</svg>';
+
+  $('#w-slope-card').style.display = '';
+  $('#w-slope').innerHTML = svg;
+  $('#w-slope-note').innerHTML =
+    `담은 단지 ${items.length}개의 <b>월별 중위 거래가</b>를 각자 첫 관측월 100 으로 맞춰 겹쳤다. `
+    + `절대 가격이 달라도 어느 쪽이 더 움직였는지 비교된다. `
+    + `<span class="muted">거래가 있었던 달만 점으로 찍힌다 — 점이 드문 단지는 그만큼 </span>`
+    + `<span class="muted">거래가 뜸했다는 뜻이고, 그 사이 선은 이어 그린 것이지 관측이 아니다.</span>`;
+  return true;
+}
+
+function renderSlope(rows){
+  // 궤적 조각을 받았으면 그쪽이 낫다. 못 받았을 때만 두 점짜리 슬로프로 떨어진다.
+  if (renderWatchTrack(rows)) return;
+  const items = rows.filter(r => r.row && changePct(r.row) != null);
+  if (items.length < 2){ $('#w-slope-card').style.display = 'none'; return; }
+  $('#w-slope-card').style.display = '';
+  const W = 860, H = Math.max(220, 60 + items.length * 26), ml = 150, mr = 150, mt = 30, mb = 24;
+  const iw = W - ml - mr, ih = H - mt - mb;
+  const pairs = items.map(({row}) => ({
+    name: `${row[PIC.apt]} ${row[PIC.area_type]}㎡`,
+    a: row[PIC.prev_median], b: row[PIC.median_amount],
+    ch: changePct(row),
+  })).sort((x,y) => y.ch - x.ch);
+  // 100 기준 정규화. 절대가가 10배 차이나면 같은 축에서 기울기가 안 보인다.
+  const norm = pairs.map(p => ({...p, na: 100, nb: 100 * p.b / p.a}));
+  const lo = Math.min(...norm.map(p => p.nb), 100), hi = Math.max(...norm.map(p => p.nb), 100);
+  const pad = Math.max((hi - lo) * 0.15, 2);
+  const y = v => mt + ih - ((v - (lo - pad)) / ((hi + pad) - (lo - pad) || 1)) * ih;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="관심단지 시세 변화 비교">`;
+  svg += `<line class="gridline" x1="${ml}" y1="${y(100)}" x2="${ml+iw}" y2="${y(100)}"/>`;
+  svg += `<text class="axis-text" x="${ml+iw+8}" y="${y(100)+4}">100 (변화 없음)</text>`;
+  for (const p of norm){
+    const col = p.ch > 0 ? 'var(--up)' : (p.ch < 0 ? 'var(--down)' : 'var(--muted)');
+    svg += `<line x1="${ml}" y1="${y(100)}" x2="${ml+iw}" y2="${y(p.nb)}" stroke="${col}"`
+        +  ` stroke-width="1.8" opacity=".85"/>`
+        +  `<circle cx="${ml}" cy="${y(100)}" r="3.2" fill="${col}"/>`
+        +  `<circle cx="${ml+iw}" cy="${y(p.nb)}" r="3.6" fill="${col}"/>`
+        +  `<text class="axis-text" x="${ml-10}" y="${y(100)+4}" text-anchor="end"`
+        +  ` opacity="0">${esc(p.name)}</text>`
+        +  `<text class="axis-text" x="${ml+iw+8}" y="${y(p.nb)+4}" fill="${col}">`
+        +  `${esc(p.name)} ${p.ch > 0 ? '+' : ''}${p.ch.toFixed(1)}%</text>`;
+  }
+  svg += `<text class="axis-text" x="${ml}" y="${mt-12}" text-anchor="middle">`
+      +  `${esc(PI.prior_window[0])}~${esc(PI.prior_window[1])}</text>`
+      +  `<text class="axis-text" x="${ml+iw}" y="${mt-12}" text-anchor="middle">`
+      +  `${esc(PI.window[0])}~${esc(PI.window[PI.window.length-1])}</text></svg>`;
+  $('#w-slope').innerHTML = svg;
+  $('#w-slope-note').innerHTML =
+    `양쪽 창 모두 거래가 있는 ${items.length}개 단지를 왼쪽 100 으로 맞춰 겹쳤다. `
+    + `절대 가격이 달라도 어느 쪽이 더 올랐는지 비교된다. `
+    + `<span class="muted">월간 궤적은 시군구별 조각으로 따로 두고 필요할 때 받아오는데, `
+    + `지금은 받지 못해(오프라인이거나 파일을 직접 열었을 때 그렇다) 두 창의 시세만 잇는다.</span>`;
+}
+
+/* --- 내보내기 / 가져오기 --- */
+function watchToHash(){
+  const keys = Object.keys(WATCH.items);
+  if (!keys.length) return '';
+  const packed = keys.map(k => {
+    const t = WATCH.items[k].target;
+    return t ? `${k}~${t}` : k;
+  }).join(';');
+  // 단지명에 한글이 들어가므로 인코딩해서 싣는다.
+  return '#w=' + encodeURIComponent(packed);
+}
+function watchFromHash(){
+  const m = /[#&]w=([^&]+)/.exec(location.hash);
+  if (!m) return false;
+  let added = 0;
+  try {
+    for (const part of decodeURIComponent(m[1]).split(';')){
+      if (!part) continue;
+      const [k, t] = part.split('~');
+      if (k.split('|').length !== 3) continue;
+      if (!WATCH.items[k]){ added++; }
+      WATCH.items[k] = {target: t ? +t : null, added: D.meta.analyzed_at};
+    }
+  } catch (e){ return false; }
+  if (added) saveWatch();
+  return added > 0;
+}
+async function copyText(text, btn, okLabel){
+  const done = () => { const t = btn.textContent; btn.textContent = okLabel;
+                       setTimeout(() => btn.textContent = t, 1600); };
+  try { await navigator.clipboard.writeText(text); done(); }
+  catch (e){
+    // 클립보드 권한이 없거나 http 로 열었을 때. 조용히 실패하지 않고 직접 복사하게 한다.
+    window.prompt('아래 내용을 복사할 것', text);
+  }
+}
+function setupWatchTools(){
+  $('#w-search').oninput = renderSearch;
+  $('#w-export').onclick = () => {
+    const h = watchToHash();
+    if (!h) return alert('담은 단지가 없다.');
+    copyText(location.origin + location.pathname + h, $('#w-export'), '주소 복사됨');
+    location.hash = h.slice(1);
+  };
+  $('#w-json').onclick = () => {
+    const items = Object.keys(WATCH.items).map(k => {
+      const [lawd_cd, apt, area_type] = k.split('|');
+      const t = WATCH.items[k].target;
+      return {lawd_cd, apt, area_type: +area_type, ...(t ? {target: t} : {})};
+    });
+    copyText(JSON.stringify({items}, null, 2), $('#w-json'), 'JSON 복사됨');
+  };
+  $('#w-clear').onclick = () => {
+    if (!Object.keys(WATCH.items).length) return;
+    if (!confirm('담은 단지를 전부 지운다. 되돌릴 수 없다.')) return;
+    WATCH = {v:1, items:{}, snap:null};
+    saveWatch(); renderWatchAll(); if (tab === 'map') renderMap();
+  };
+}
+
+function renderWatchAll(){
+  renderWatchBadge();
+  renderWatchChange();
+  renderWatchList();
+  // 궤적 조각은 담은 단지가 있는 시군구 것만, 뒤늦게 받아온다. 먼저 슬로프로 그려
+  // 두고 조각이 도착하면 궤적으로 바꿔 끼운다 - 기다렸다 그리면 탭이 빈 채로 멈춘다.
+  const lawds = Object.keys(WATCH.items).map(k => k.split('|')[0]);
+  if (lawds.length){
+    ensureShards(lawds).then(fresh => { if (fresh) renderSlope(watchRows()); });
+  }
+}
+
+// 관심단지가 있는 시군구 - 지도에서 강조한다
+function watchedLawds(){
+  const s = new Set();
+  for (const k of Object.keys(WATCH.items)) s.add(k.split('|')[0]);
+  return s;
+}
+
+/* ---------- 재건축 기대 분해 ---------- */
+function renderRebuild(){
+  const rb = D.rebuild;
+  if (!rb || !rb.rows.length) return;
+  $('#rebuild-card').style.display = '';
+  const curve = rb.curve.filter(c => c.median_ppp != null);
+  const oldest = curve[curve.length-1], dip = curve.reduce((a,c) =>
+    (a == null || c.median_ppp < a.median_ppp) ? c : a, null);
+  $('#rebuild-note').innerHTML =
+    `아파트값은 보통 나이가 들수록 내려간다. 실제로 수도권 중위 평당가는 `
+    + `<b style="color:var(--text)">${nf(curve[0].median_ppp)}</b>만원(${curve[0].bucket})에서 `
+    + `<b style="color:var(--text)">${nf(dip.median_ppp)}</b>만원(${dip.bucket})까지 떨어진다. `
+    + `그런데 <b style="color:var(--text)">${oldest.bucket}</b> 구간에서 `
+    + `<b style="color:var(--text)">${nf(oldest.median_ppp)}</b>만원으로 되튄다. `
+    + `이 반등이 건물값일 리는 없으니, 재건축 기대가 값에 실린 것으로 본다.`;
+  const max = Math.max(...curve.map(c => c.median_ppp));
+  $('#rebuild-curve').innerHTML = curve.map(c => {
+    const isOld = c.lo >= rb.rebuild_age;
+    return `<div class="dist-row">
+      <div>${esc(c.bucket)}</div>
+      <div class="track"><div class="fill" style="width:${(c.median_ppp/max*100).toFixed(1)}%;
+        background:${isOld ? 'var(--up)' : 'var(--accent)'}"></div></div>
+      <div class="dist-val"><b style="color:var(--text)">${nf(c.median_ppp)}</b>만원/평
+        · 단지 ${nf(c.count)}개</div>
+    </div>`;
+  }).join('');
+
+  const names = {};
+  $('#rebuild-body').innerHTML = rb.rows.map(r => {
+    const k = `${r.lawd_cd}|${r.apt}|${r.area_type}`;
+    return `<tr>
+      <td style="text-align:left">${starHtml(k)}</td>
+      <td>${esc(shortName(r.region))} ${esc(r.umd)}</td>
+      <td class="name">${esc(r.apt)}</td>
+      <td>${r.area_type}㎡</td>
+      <td>${r.build_year} <span class="muted">(${r.age}년)</span></td>
+      <td><b>${nf(r.median_ppp)}</b></td>
+      <td class="muted">${nf(r.base_ppp)}</td>
+      <td>${pct(r.premium_pct)}</td>
+      <td>${r.count}건</td>
+    </tr>`;
+  }).join('');
+  bindStars($('#rebuild-body'));
+  $('#rebuild-warn').innerHTML =
+    `<b>이 값은 "재건축 가치"가 아니라 "같은 동네 새 아파트 대비 웃돈"이다.</b> `
+    + `재건축 기대의 크기는 결국 대지지분이 좌우하는데 실거래가 API 에 그 값이 없어, `
+    + `값의 잔차로만 추정한 것이다. 학군·역세권처럼 나이와 무관한 이유로 비싼 노후 단지도 `
+    + `같이 올라온다. `
+    + `기준선은 <b>같은 법정동</b>의 ${rb.rebuild_age}년 미만 단지 중위 평당가다 — `
+    + `시군구로 묶으면 강남구 도곡동과 개포동이 한 기준선에 들어가 재건축 기대가 아니라 `
+    + `동네 차이를 재게 된다. 단지가 ${rb.min_complexes}개 이상인 동만 대상이고, `
+    + `동 전체가 노후라 기준선을 못 세운 ${rb.skipped_no_base}개 동은 뺐다. `
+    + `대상 ${nf(rb.total)}개의 웃돈은 중위 ${rb.median_pct}% (25~75% ${rb.p25_pct}~${rb.p75_pct}%)이고, `
+    + `+30%를 넘는 것이 ${nf(rb.over30_count)}개다.`;
 }
 
 /* ---------- 층별 프리미엄 ---------- */
@@ -1407,6 +2029,11 @@ function renderMap(quick){
   // 1) 기둥 높이를 먼저 정한다. 화면 맞춤이 높이에 걸려 있어서다.
   const hMax = g.span * 0.42 * MAP.exag;
   const dull = noval();
+  // 관심단지가 있는 시군구를 표시한다. 지도를 열었을 때 "내가 보는 동네가 어디였지"를
+  // 다시 찾지 않아도 되게 하는 것이 목적이다.
+  const wl = watchedLawds();
+  const watchedCells = new Set();
+  for (const l of wl){ const cell = GEO.cell_of[l]; if (cell) watchedCells.add(cell); }
   const info = g.cells.map(c => {
     const v = cellValue(c.cell, key, mi);
     const inSido = activeSido === 'ALL' || sidoOf(c.cell) === activeSido;
@@ -1445,7 +2072,7 @@ function renderMap(quick){
     for (const r of c.rings) plate += 'M' + r.map(p => P(p[0],p[1],0)).join('L') + 'Z';
   out += `<path class="plate" d="${plate}"/>`;
 
-  const labels = [];
+  const labels = [], stars = [];
   const BUCKETS = 12;   // 옆면 명암 단계. 벽 하나당 path 를 만들면 2천 개가 넘는다.
   for (const {i} of order){
     const {c, v, inSido, base, h} = info[i];
@@ -1470,9 +2097,12 @@ function renderMap(quick){
     let body = '';
     for (const [b, d] of buckets) body += `<path d="${d}" fill="${shade(base, b/BUCKETS)}"/>`;
     const top = c.rings.map(r => 'M' + r.map(p => P(p[0],p[1],h)).join('L') + 'Z').join('');
-    body += `<path d="${top}" fill="${base}" stroke="${shade(base, 1.45)}" stroke-width=".8"/>`;
+    const watched = watchedCells.has(c.cell);
+    body += `<path d="${top}" fill="${base}" stroke="${watched ? '#f5c451' : shade(base, 1.45)}"`
+         +  ` stroke-width="${watched ? 2 : 0.8}"/>`;
     const sel = MAP.sel === c.cell ? ' class="sel"' : '';
     out += `<g data-cell="${esc(c.cell)}"${sel}>${body}</g>`;
+    if (watched) stars.push(P(c.cx, c.cy, h));
     if (MAP.labels && inSido && v != null){
       const [lx, ly] = P(c.cx, c.cy, h).split(',');
       labels.push({x:+lx, y:+ly - 5, v, text: mapLabelText(GEO.labels[c.cell] || c.cell)});
@@ -1488,6 +2118,11 @@ function renderMap(quick){
     placed.push(L);
     out += `<text class="maplabel" x="${L.x.toFixed(1)}" y="${L.y.toFixed(1)}" `
          + `text-anchor="middle">${esc(L.text)}</text>`;
+  }
+  for (const xy of stars){
+    const [sx, sy] = xy.split(',');
+    out += `<text class="maplabel" x="${sx}" y="${(+sy - 15).toFixed(1)}" text-anchor="middle"`
+        +  ` fill="#f5c451" style="font-size:14px">★</text>`;
   }
   out += '</svg>';
   $('#map').innerHTML = out;
@@ -1829,9 +2464,15 @@ renderJeonse();
 renderDealType();
 renderSettlement();
 renderParty();
+renderRebuild();
 renderAnomalies();
 setupMap();
+setupWatchTools();
+// 주소에 담긴 목록이 있으면 먼저 받아들인다(폰 -> PC 이동, 링크 공유).
+const hashAdded = watchFromHash();
+renderWatchAll();
 renderAll();
+if (hashAdded) switchTab('watch');
 
 $('#chart-mode').querySelectorAll('button').forEach(b => b.onclick = () => {
   chartMode = b.dataset.mode;
