@@ -337,6 +337,9 @@ def normalize(row, lawd_cd):
         "buyer": _first(row, "buyerGbn"),
         "canceled": cdeal in ("O", "Y"),              # 해제(취소)된 거래
         "cancel_day": _first(row, "cdealDay"),
+        # 해제일도 등기일과 같은 'YY.MM.DD' 형식이다. 계약에서 해제까지 며칠 걸렸는지
+        # 보려면 날짜로 세워야 한다.
+        "cancel_date": _rgst_date(_first(row, "cdealDay")),
         "deal_day": day,                              # 주간 시계열용
         "agent_sgg": _first(row, "estateAgentSggNm"), # 중개사 소재지 시군구
         "rgst_date": _rgst_date(_first(row, "rgstDate")),
@@ -349,6 +352,11 @@ def normalize(row, lawd_cd):
                                - date(year, month, day)).days
     else:
         rec["days_to_rgst"] = None
+    if rec["cancel_date"]:
+        rec["days_to_cancel"] = (date(*map(int, rec["cancel_date"].split("-")))
+                                 - date(year, month, day)).days
+    else:
+        rec["days_to_cancel"] = None
     if area:
         rec["price_per_m2"] = round(amount / area, 2)                      # 만원/㎡
         rec["price_per_pyeong"] = round(amount / (area / PYEONG_PER_M2))   # 만원/평

@@ -6,9 +6,9 @@ from apt_analytics import (
     PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym,
     _same_month_last_year, analyze, area_distribution, build_kpi, cancel_rate_series,
     deal_type_stats, missing_regions, monthly_series, record_highs, reference_month,
-    anomaly_flags, complex_histories, floor_premium, jeonse_ratio, outside_agent_stats,
-    party_stats, region_monthly, region_ranking, settlement_series, summarize,
-    umd_ranking, week_anchor, weekly_series,
+    anomaly_flags, cancel_analysis, complex_histories, floor_premium, jeonse_ratio,
+    matched_index, outside_agent_stats, party_stats, region_monthly, region_ranking,
+    settlement_series, summarize, umd_breakdown, umd_ranking, week_anchor, weekly_series,
 )
 
 
@@ -692,6 +692,128 @@ class NewFieldsInAnalyzeTest(unittest.TestCase):
         row = out["regions"][0]
         self.assertEqual(row["outside_pct"], 10.0)
         self.assertEqual(row["outside_judged"], 300)
+
+
+class MatchedIndexTest(unittest.TestCase):
+    """구성 효과를 뺀 지수. 대시보드의 대표 숫자가 방향까지 틀릴 수 있어서 만든 것이다."""
+
+    MONTHS = ["2026-01", "2026-02", "2026-03"]
+
+    def _rows(self, ym, n, ppp, apt="가", code="11680"):
+        return [dict(rec(ym, ppp, code=code), apt=apt, area_type=84) for _ in range(n)]
+
+    def test_composition_does_not_move_the_index(self):
+        """비싼 지역이 많이 거래된 달에도, 각 단지 값이 그대로면 지수는 그대로여야 한다.
+
+        이게 이 지수의 존재 이유다. 실측에서 원지수는 15개월간 100 -> 75.4 로 떨어지는데
+        매칭 지수는 100 -> 113.7 로 올랐다. 방향이 반대였다.
+        """
+        rows = []
+        for ym in self.MONTHS:
+            rows += self._rows(ym, 40, 9000, apt="비싼", code="11680")
+            rows += self._rows(ym, 40, 3000, apt="싼", code="41135")
+        # 2026-02 에만 비싼 단지가 쏟아진다 - 값은 그대로인데 구성만 바뀐다
+        rows += self._rows("2026-02", 200, 9000, apt="비싼", code="11680")
+        out = matched_index(rows, self.MONTHS, min_pairs=1)
+        self.assertEqual([r["index"] for r in out["rows"]], [100.0, 100.0, 100.0])
+        # 원지수는 그 달에 끌려 올라간다 - 이 차이를 보여주려는 것이다
+        self.assertGreater(out["rows"][1]["raw_index"], 100)
+
+    def test_real_price_move_is_captured(self):
+        rows = (self._rows("2026-01", 40, 1000) + self._rows("2026-02", 40, 1100)
+                + self._rows("2026-03", 40, 1210))
+        out = matched_index(rows, self.MONTHS, min_pairs=1)
+        self.assertAlmostEqual(out["rows"][1]["index"], 110.0, places=1)
+        self.assertAlmostEqual(out["rows"][2]["index"], 121.0, places=1)
+
+    def test_thin_month_holds_the_index_instead_of_inventing_one(self):
+        # 수집 마지막 달은 하루치만 들어오기도 한다. 그 표본으로 지수를 움직이면 안 된다.
+        rows = self._rows("2026-01", 400, 1000) + self._rows("2026-02", 400, 1000)
+        rows += self._rows("2026-03", 2, 5000)          # 하루치, 값도 튄다
+        out = matched_index(rows, self.MONTHS, min_pairs=1, min_month_share=0.3)
+        last = out["rows"][-1]
+        self.assertTrue(last["thin"])
+        self.assertEqual(last["index"], out["rows"][-2]["index"])
+
+    def test_pairs_need_both_months(self):
+        # 한쪽 달에만 있는 단지는 비를 만들 수 없다
+        rows = self._rows("2026-01", 30, 1000, apt="가") + self._rows("2026-02", 30, 2000, apt="나")
+        out = matched_index(rows, self.MONTHS, min_pairs=1)
+        self.assertEqual(out["rows"][1]["pairs"], 0)
+        self.assertTrue(out["rows"][1]["thin"])
+
+    def test_span_pct_reported_for_both(self):
+        rows = (self._rows("2026-01", 40, 1000) + self._rows("2026-02", 40, 1200)
+                + self._rows("2026-03", 40, 1200))
+        out = matched_index(rows, self.MONTHS, min_pairs=1)
+        self.assertAlmostEqual(out["span_pct"], 20.0, places=1)
+        self.assertIsNotNone(out["raw_span_pct"])
+
+
+class CancelAnalysisTest(unittest.TestCase):
+    MONTHS = ["2026-05", "2026-06"]
+
+    def _dead(self, ym, days, amount=100000, apt="가"):
+        r = dict(deal(ym, amount, apt=apt), canceled=True)
+        r["days_to_cancel"] = days
+        return r
+
+    def test_days_to_cancel_summary(self):
+        rows = [self._dead("2026-06", d) for d in (5, 10, 20, 40, 100)]
+        rows += [deal("2026-06", 100000) for _ in range(5)]
+        out = cancel_analysis(rows, self.MONTHS, min_rows=1)
+        self.assertEqual(out["canceled"], 5)
+        self.assertEqual(out["median_days"], 20)
+        self.assertEqual(out["within_30d_pct"], 60.0)
+
+    def test_price_vs_live_median(self):
+        # 정상 거래 5건이 10억, 해제 1건이 12억이면 +20%
+        rows = [deal("2026-06", 100000, apt="가") for _ in range(5)]
+        rows.append(self._dead("2026-06", 10, amount=120000, apt="가"))
+        out = cancel_analysis(rows, self.MONTHS, min_rows=1)
+        self.assertEqual(out["vs_live_median_pct"], 20.0)
+        self.assertEqual(out["compared"], 1)
+
+    def test_no_baseline_means_no_comparison(self):
+        # 정상 거래가 3건 미만이면 기준을 세우지 않는다
+        rows = [deal("2026-06", 100000, apt="가"), self._dead("2026-06", 10, apt="가")]
+        out = cancel_analysis(rows, self.MONTHS, min_rows=1)
+        self.assertEqual(out["compared"], 0)
+        self.assertIsNone(out["vs_live_median_pct"])
+
+    def test_missing_cancel_date_is_skipped_not_zeroed(self):
+        r = dict(deal("2026-06", 100000), canceled=True)
+        r["days_to_cancel"] = None
+        out = cancel_analysis([r], self.MONTHS, min_rows=1)
+        self.assertEqual(out["canceled"], 1)
+        self.assertEqual(out["measured_days"], 0)
+        self.assertIsNone(out["median_days"])
+
+
+class UmdBreakdownTest(unittest.TestCase):
+    def test_groups_by_region_and_sorts_by_price(self):
+        rows = ([rec("2026-06", 9000, umd="압구정동") for _ in range(12)]
+                + [rec("2026-06", 5000, umd="역삼동") for _ in range(12)])
+        out = umd_breakdown(rows, min_deals=10)
+        got = out["regions"]["11680"]
+        self.assertEqual([r["umd"] for r in got], ["압구정동", "역삼동"])
+
+    def test_thin_umd_excluded(self):
+        rows = ([rec("2026-06", 9000, umd="많은동") for _ in range(12)]
+                + [rec("2026-06", 9000, umd="적은동") for _ in range(3)])
+        out = umd_breakdown(rows, min_deals=10)
+        self.assertEqual([r["umd"] for r in out["regions"]["11680"]], ["많은동"])
+
+    def test_blank_umd_dropped(self):
+        rows = [rec("2026-06", 9000, umd="") for _ in range(12)]
+        self.assertEqual(umd_breakdown(rows, min_deals=10)["regions"], {})
+
+    def test_top_per_region_caps_the_list(self):
+        rows = []
+        for i in range(20):
+            rows += [rec("2026-06", 1000 + i, umd=f"동{i}") for _ in range(10)]
+        out = umd_breakdown(rows, min_deals=10, top_per_region=5)
+        self.assertEqual(len(out["regions"]["11680"]), 5)
 
 
 if __name__ == "__main__":

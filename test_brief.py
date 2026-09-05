@@ -2,7 +2,27 @@
 """주간 브리핑 생성 테스트. `python test_brief.py` 로 실행."""
 import unittest
 
-from weekly_brief import build, delta_line, fmt_amount, fmt_pct
+import json
+import os
+import tempfile
+
+from weekly_brief import (build, delta_line, fmt_amount, fmt_pct, load_watchlist,
+                          watchlist_section)
+
+
+PRICE_INDEX = {
+    "columns": ["lawd_cd", "apt", "area_type", "median_amount", "min_amount",
+                "max_amount", "count", "median_ppp", "build_year", "umd",
+                "prev_median", "prev_count"],
+    "rows": [
+        ["11680", "은마", 84, 388000, 370000, 420000, 10, 15202, 1979, 0, 414000, 8],
+        ["11680", "은마", 76, 345000, 330000, 380000, 14, 14916, 1979, 0, None, 0],
+    ],
+    "region_names": {"11680": "서울특별시 강남구"},
+    "umd_names": ["대치동"],
+    "window": ["2025-12", "2026-08"],
+    "min_deals": 3,
+}
 
 
 def analytics(**over):
@@ -75,6 +95,68 @@ class BuildTest(unittest.TestCase):
     def test_provisional_month_is_flagged(self):
         text, _ = build(analytics(), {})
         self.assertIn("잠정치", text)
+
+
+class WatchlistTest(unittest.TestCase):
+    """저장소에 커밋한 관심단지를 브리핑이 읽는 부분.
+
+    브라우저 localStorage 는 서버에서 보이지 않는다. 화면을 열지 않아도 관심단지
+    소식이 오게 하는 유일한 통로라, 조용히 빠지면 기능 자체가 없는 것과 같다.
+    """
+
+    def test_missing_file_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(load_watchlist(os.path.join(d, "없음.json")), {})
+
+    def test_broken_file_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "watchlist.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("{ 깨진 json")
+            self.assertEqual(load_watchlist(p), {})
+
+    def test_reads_items(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "watchlist.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"items": {"11680|은마|84": {"target": 400000}}}, f)
+            self.assertIn("11680|은마|84", load_watchlist(p))
+
+    def test_section_lists_watched_complexes(self):
+        a = analytics(price_index=PRICE_INDEX)
+        out = "\n".join(watchlist_section(a, {"11680|은마|84": {}}))
+        self.assertIn("## 관심단지", out)
+        self.assertIn("은마", out)
+        self.assertIn("38.8억", out)
+        self.assertIn("-6.3%", out)          # 414,000 -> 388,000
+
+    def test_target_reached_is_marked(self):
+        a = analytics(price_index=PRICE_INDEX)
+        hit = "\n".join(watchlist_section(a, {"11680|은마|84": {"target": 400000}}))
+        miss = "\n".join(watchlist_section(a, {"11680|은마|84": {"target": 300000}}))
+        self.assertIn("✅", hit)
+        self.assertNotIn("✅", miss)
+
+    def test_no_prior_window_shows_dash_not_crash(self):
+        # prev_median 이 None 인 행(직전 창에 거래가 모자란 경우)
+        out = "\n".join(watchlist_section(analytics(price_index=PRICE_INDEX),
+                                          {"11680|은마|76": {}}))
+        self.assertIn("34.5억", out)
+
+    def test_untraded_complex_is_explained_not_dropped(self):
+        # 조용히 빠지면 "내 단지가 안 오르나 보다"로 오해한다
+        out = "\n".join(watchlist_section(analytics(price_index=PRICE_INDEX),
+                                          {"41135|없는단지|84": {}}))
+        self.assertIn("없는단지", out)
+        self.assertIn("거래가 없어", out)
+
+    def test_empty_watchlist_adds_nothing(self):
+        self.assertEqual(watchlist_section(analytics(price_index=PRICE_INDEX), {}), [])
+
+    def test_build_without_watchlist_is_unchanged(self):
+        a = analytics(price_index=PRICE_INDEX)
+        text, _ = build(a, {})
+        self.assertNotIn("## 관심단지", text)
 
 
 if __name__ == "__main__":

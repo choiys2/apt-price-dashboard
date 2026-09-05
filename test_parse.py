@@ -295,6 +295,19 @@ class NewFieldsNormalizeTest(unittest.TestCase):
         r = normalize({**self.ROW, "estateAgentSggNm": "경기 성남시 분당구"}, "11680")
         self.assertTrue(r["is_outside_agent"])
 
+    def test_cancel_date_and_days(self):
+        r = normalize({**self.ROW, "cdealType": "O", "cdealDay": "26.05.20"}, "11680")
+        self.assertTrue(r["canceled"])
+        self.assertEqual(r["cancel_date"], "2026-05-20")
+        self.assertEqual(r["days_to_cancel"], 16)     # 2026-05-04 -> 05-20
+
+    def test_uncanceled_has_no_cancel_date(self):
+        # 0 으로 두면 "계약 당일 해제"가 되어 소요일 통계가 망가진다.
+        r = normalize(self.ROW, "11680")
+        self.assertFalse(r["canceled"])
+        self.assertIsNone(r["cancel_date"])
+        self.assertIsNone(r["days_to_cancel"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

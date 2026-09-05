@@ -283,6 +283,18 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <p class="sub" id="chart-note" style="margin-top:10px"></p>
 </section>
 
+<!-- 위 차트의 중위 평당가가 무엇에 끌려다니는지 바로 아래에서 밝힌다 -->
+<section class="card" id="mi-card" style="display:none">
+  <h2>구성 효과를 뺀 가격 지수</h2>
+  <p class="sub" id="mi-note" style="margin:0 0 12px"></p>
+  <div class="legend" style="margin-bottom:10px">
+    <span><i style="background:var(--up)"></i>같은 단지·같은 타입끼리 견준 지수</span>
+    <span><i style="background:var(--muted)"></i>월별 중위 평당가(위 차트와 같은 값)</span>
+  </div>
+  <div id="mi-chart"></div>
+  <p class="sub" id="mi-warn" style="margin-top:12px"></p>
+</section>
+
 <!-- 확정도: 앞의 차트에서 "잠정"이라고만 하던 것을 측정값으로 바꾼다 -->
 <section class="card" id="settle-card" style="display:none">
   <h2>거래 확정도 (등기완료율)</h2>
@@ -345,6 +357,13 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <div class="dist" id="dealtype"></div>
   <p class="sub" style="margin-top:12px">직거래는 가족 간 증여성 거래 등이 섞여 시세보다
     낮게 신고되는 경우가 많다. 위 필터의 "중개거래만"으로 제외하고 볼 수 있다.</p>
+</section>
+
+<section class="card" id="cancel-card" style="display:none">
+  <h2>해제(취소) 거래</h2>
+  <p class="sub" id="cancel-note" style="margin:0 0 14px"></p>
+  <div class="dist" id="cancel-dist"></div>
+  <p class="sub" id="cancel-warn" style="margin-top:12px"></p>
 </section>
 
 <section class="card" id="party-card" style="display:none">
@@ -485,6 +504,8 @@ footer ul{padding-left:18px;margin:8px 0 0}
   </div>
   <p class="sub" id="m-dsub" style="margin:0 0 12px"></p>
   <div id="m-dchart"></div>
+  <!-- 시군구는 넓다. 한 단계 더 내려가 법정동별로 갈라 본다. -->
+  <div id="m-dumd" style="margin-top:18px"></div>
 </section>
 
 </div><!-- /pane-map -->
@@ -709,7 +730,13 @@ function renderChart(){
   if (chartMode === 'week') return renderWeekChart();
   $('#chart-title').textContent = '월별 거래량 · 중위 평당가';
   $('#lg-band').hidden = false;
-  $('#chart-note').textContent = '';
+  // 이 선은 그달에 무엇이 거래됐는지에 끌려간다. 바로 아래 카드가 그 효과를 빼고
+  // 다시 잰 값인데, 방향이 반대로 나올 수도 있어 여기서 미리 짚어 준다.
+  const mi = D.matched_index;
+  $('#chart-note').innerHTML = !mi ? '' :
+    `이 중위 평당가는 그달에 <b>무엇이 거래됐는지</b>에 함께 끌려간다(진폭 ${mi.raw_span_pct}%). `
+    + `구성 효과를 뺀 값은 <a href="#mi-card" style="color:var(--accent)">바로 아래 카드</a>에 있다`
+    + `(진폭 ${mi.span_pct}%).`;
   const ms = monthlyFor(sido);
   const W = 860, H = 300, ml = 52, mr = 58, mt = 16, mb = 42;
   const iw = W - ml - mr, ih = H - mt - mb;
@@ -828,6 +855,108 @@ function renderWeekChart(){
   $('#chart').innerHTML = svg;
   const wk = (V().weekly || {});
   $('#chart-note').textContent = wk.note || '';
+}
+
+/* ---------- 구성 효과를 뺀 가격 지수 ----------
+   위 차트의 중위 평당가는 그달에 "무엇이 거래됐는지"에 끌려간다. 같은 단지 x 같은
+   타입끼리만 견준 지수를 나란히 그려 그 차이를 눈으로 보게 한다. 두 선이 갈라지는
+   구간이 곧 구성 효과의 크기다. */
+function renderMatchedIndex(){
+  const mi = D.matched_index;
+  if (!mi || mi.rows.length < 3) return;
+  $('#mi-card').style.display = '';
+  const rows = mi.rows;
+  const W = 860, H = 300, ml = 46, mr = 58, mt = 16, mb = 40;
+  const iw = W-ml-mr, ih = H-mt-mb;
+  const vals = rows.flatMap(r => [r.index, r.raw_index]).filter(v => v != null);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = Math.max((hi-lo)*0.08, 2);
+  const x = i => ml + (iw/Math.max(rows.length-1,1))*i;
+  const y = v => mt + ih - ((v-(lo-pad))/((hi+pad)-(lo-pad) || 1))*ih;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="구성 효과를 뺀 가격 지수와 월별 중위 평당가 비교">`;
+  for (let t = 0; t <= 4; t++){
+    const v = (lo-pad) + ((hi+pad)-(lo-pad))*t/4;
+    svg += `<line class="gridline" x1="${ml}" y1="${y(v)}" x2="${ml+iw}" y2="${y(v)}"/>`
+        +  `<text class="axis-text" x="${ml-8}" y="${y(v)+4}" text-anchor="end">${v.toFixed(0)}</text>`;
+  }
+  svg += `<line x1="${ml}" y1="${y(100)}" x2="${ml+iw}" y2="${y(100)}" stroke="var(--muted)"`
+      +  ` stroke-dasharray="4 4" opacity=".55"/>`;
+  const path = (key, color, width, dash) => {
+    const pts = rows.map((r,i) => r[key] == null ? null : [x(i), y(r[key])]).filter(Boolean);
+    if (pts.length < 2) return '';
+    return `<path d="${pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ')}"`
+      + ` fill="none" stroke="${color}" stroke-width="${width}"`
+      + (dash ? ` stroke-dasharray="${dash}"` : '') + ` stroke-linejoin="round"/>`;
+  };
+  svg += path('raw_index', 'var(--muted)', 1.8, '5 4');
+  svg += path('index', 'var(--up)', 2.4);
+  rows.forEach((r,i) => {
+    if (r.index == null) return;
+    svg += `<circle cx="${x(i).toFixed(1)}" cy="${y(r.index).toFixed(1)}" r="${r.thin?2:3.2}"`
+        +  ` fill="${r.thin ? 'var(--muted)' : 'var(--up)'}"><title>${r.ym} 지수 ${r.index}`
+        +  `${r.pairs != null ? ` (매칭 ${nf(r.pairs)}쌍${r.thin ? ', 표본 부족 - 지수 유지' : ''})` : ''}`
+        +  `</title></circle>`;
+  });
+  const step = Math.ceil(rows.length/8);
+  rows.forEach((r,i) => { if (i % step && i !== rows.length-1) return;
+    svg += `<text class="axis-text" x="${x(i)}" y="${mt+ih+18}" text-anchor="middle">${r.ym.slice(2)}</text>`; });
+  svg += `<text class="axis-text" x="${ml}" y="${H-6}">${esc(rows[0].ym)} = 100</text></svg>`;
+  $('#mi-chart').innerHTML = svg;
+
+  const last = [...rows].reverse().find(r => !r.thin) || rows[rows.length-1];
+  const lastRaw = [...rows].reverse().find(r => r.raw_index != null);
+  $('#mi-note').innerHTML =
+    `월별 중위 평당가는 그달에 <b>무엇이 거래됐는지</b>에 끌려간다. 강남이 많이 거래된 달은 `
+    + `수도권 전체가 오른 것처럼, 외곽이 많이 거래된 달은 내린 것처럼 보인다. `
+    + `같은 단지 × 같은 전용타입끼리만 짝지어 다시 재면 그 효과가 빠진다 — `
+    + `<b style="color:var(--text)">${esc(last.ym)} 기준 ${last.index}</b>`
+    + (lastRaw ? ` <span class="muted">(중위 평당가로는 ${lastRaw.raw_index})</span>` : '') + `.`;
+  $('#mi-warn').innerHTML =
+    `진폭으로 보면 중위 평당가가 <b>${mi.raw_span_pct}%</b>, 매칭 지수가 `
+    + `<b>${mi.span_pct}%</b>다. 그 차이가 곧 구성 효과의 크기다. `
+    + `<br>인접한 두 달 모두 거래가 있는 조합만 쓰고, 매칭이 ${mi.min_pairs}쌍 미만이거나 `
+    + `거래가 ${nf(mi.min_month_rows)}건(월 중위의 ${Math.round(mi.min_month_share*100)}%) 미만인 달은 `
+    + `지수를 움직이지 않고 그대로 둔다 — 표본이 없는 달에 값을 지어내지 않기 위해서다. `
+    + `<span class="muted">이 지수는 "거래된 단지들"의 가격 변화이지 재고 전체가 아니다. `
+    + `거래가 뜸한 단지는 애초에 들어오지 못한다.</span>`;
+}
+
+/* ---------- 해제(취소) 거래 ---------- */
+function renderCancels(){
+  const c = D.cancels;
+  if (!c || !c.median_days) return;
+  $('#cancel-card').style.display = '';
+  $('#cancel-note').innerHTML =
+    `이번 집계에서 해제된 <b style="color:var(--text)">${nf(c.canceled)}건</b>을 따로 봤다. `
+    + `계약에서 해제까지 <b style="color:var(--text)">중위 ${c.median_days}일</b> `
+    + `(25~75% ${c.p25_days}~${c.p75_days}일)이고, `
+    + `<b style="color:var(--text)">${c.within_30d_pct}%</b>가 30일 안에 취소됐다.`;
+
+  const vs = c.vs_live_median_pct;
+  const rows = [
+    ['30일 이내 취소', c.within_30d_pct, `${c.within_30d_pct}% · ${nf(c.measured_days)}건 측정`],
+    ['정상 거래 대비 가격', vs == null ? null : Math.abs(vs),
+     vs == null ? '–' : `${vs > 0 ? '+' : ''}${vs}% · ${nf(c.compared)}건 비교`],
+  ];
+  const max = Math.max(...rows.map(r => r[1] || 0), 1);
+  $('#cancel-dist').innerHTML = rows.map(([label, v, text]) => `<div class="dist-row">
+      <div>${esc(label)}</div>
+      <div class="track"><div class="fill" style="width:${v == null ? 0 : (v/max*100).toFixed(1)}%"></div></div>
+      <div class="dist-val"><b style="color:var(--text)">${esc(text)}</b></div>
+    </div>`).join('');
+
+  // 실측 결과를 그대로 적는다. 의혹을 확인해 주지도, 없는 결론을 만들지도 않는다.
+  const verdict = vs == null ? ''
+    : Math.abs(vs) < 1
+      ? `해제된 거래의 값은 같은 단지·타입의 정상 거래 중위와 <b>사실상 같았다(${vs > 0 ? '+' : ''}${vs}%)</b>. `
+        + `"높은 값에 신고했다 취소해 시세를 띄운다"는 이야기가 있는데, 적어도 이번 집계에서는 `
+        + `해제 거래가 정상 거래보다 높았다는 흔적이 보이지 않는다.`
+      : `해제된 거래의 값은 같은 단지·타입의 정상 거래 중위 대비 `
+        + `<b>${vs > 0 ? '+' : ''}${vs}%</b>였다.`;
+  $('#cancel-warn').innerHTML = verdict
+    + ` <span class="muted">단순 변심·자금 사정·계약 분쟁이 모두 섞여 있어 원인을 가릴 수 없다. `
+    + `이 숫자 하나로 어느 쪽도 단정할 수 없다.</span>`;
 }
 
 /* ---------- 거래 확정도 (등기완료율) ---------- */
@@ -2250,6 +2379,37 @@ function renderMapDetail(){
   $('#m-dchart').innerHTML = svg
     + `<p class="sub" style="margin-top:10px">월별 중위 평당가는 표본이 `
     + `${rm.min_samples}건 미만인 달을 비운다. 두세 건짜리 중위값이 시장 변화처럼 보이면 안 된다.</p>`;
+  renderUmdBreakdown(detailLawd);
+}
+
+/* --- 법정동 드릴다운: 시군구 하나를 한 단계 더 내려간다 --- */
+function renderUmdBreakdown(lawd){
+  const box = $('#m-dumd');
+  const ub = D.umd_breakdown;
+  const rows = ub && ub.regions[lawd];
+  if (!rows || !rows.length){
+    box.innerHTML = ub
+      ? `<p class="sub">이 시군구에는 거래 ${ub.min_deals}건 이상인 법정동이 없다.</p>` : '';
+    return;
+  }
+  const max = Math.max(...rows.map(r => r.median_ppp || 0), 1);
+  const region = (REGION_BY_CODE[lawd] || {});
+  // 시군구 중위와 견줘야 "이 동이 구 안에서 어디쯤인가"가 읽힌다.
+  const base = region.median_ppp;
+  box.innerHTML =
+    `<h2 style="font-size:14.5px;margin:0 0 4px">법정동별 중위 평당가</h2>`
+    + `<p class="sub" style="margin:0 0 12px">${esc(shortName(region.region || ''))} 안에서 `
+    + `거래 ${ub.min_deals}건 이상인 법정동 ${rows.length}개 · 비싼 순`
+    + (base ? ` · 시군구 중위 <b style="color:var(--text)">${nf(base)}</b>만원/평` : '') + `</p>`
+    + `<div class="dist">` + rows.map(r => {
+        const rel = base ? (r.median_ppp - base) / base * 100 : null;
+        return `<div class="dist-row">
+          <div style="font-size:12.5px">${esc(r.umd)}</div>
+          <div class="track"><div class="fill" style="width:${(r.median_ppp/max*100).toFixed(1)}%"></div></div>
+          <div class="dist-val"><b style="color:var(--text)">${nf(r.median_ppp)}</b>만원/평
+            · ${nf(r.count)}건${rel == null ? '' : ' · 구 대비 ' + pct(rel)}</div>
+        </div>`;
+      }).join('') + `</div>`;
 }
 
 /* --- 컨트롤 --- */
@@ -2462,6 +2622,8 @@ renderBudget();
 renderFloorPremium();
 renderJeonse();
 renderDealType();
+renderMatchedIndex();
+renderCancels();
 renderSettlement();
 renderParty();
 renderRebuild();

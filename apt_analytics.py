@@ -284,6 +284,157 @@ def complex_histories(records, keys, max_points=40):
     return out
 
 
+def matched_index(records, months, min_pairs=30, min_month_share=0.3):
+    """구성 효과를 뺀 가격 지수. 같은 단지 x 같은 전용타입끼리만 견준다.
+
+    왜 필요한가 - 월별 중위 평당가는 그달에 "무엇이 거래됐는지"에 통째로 끌려간다.
+    실측으로 원지수는 15개월간 100 -> 75.4 로 내려앉는데(진폭 60.8%), 같은 단지 x 같은
+    타입끼리 짝지어 재면 100 -> 113.7 로 오른다(진폭 14.0%). 방향이 반대다. 강남이
+    많이 거래된 달은 수도권 전체가 오른 것처럼, 외곽이 많이 거래된 달은 내린 것처럼
+    보였을 뿐이다. 대시보드에서 제일 많이 보는 숫자가 그래서는 안 된다.
+
+    방법은 연쇄(chained) 매칭이다. 인접한 두 달 모두 거래가 있는 조합만 모아 가격비의
+    중위값을 구하고, 그것을 이어 붙인다. 매칭 조합이 min_pairs 미만인 달은 비를 1로
+    두고(=지수 유지) 화면에 그 사실을 남긴다 - 표본이 없는 달에 값을 지어내면 안 된다.
+
+    한계도 분명하다. 이 지수는 "거래된 단지들"의 가격 변화이지 재고 전체가 아니다.
+    거래가 뜸한 단지는 애초에 들어오지 못한다.
+    """
+    groups = defaultdict(lambda: defaultdict(list))
+    for r in records:
+        atype = _area_type(r)
+        if not atype or not r.get("apt") or not r.get("price_per_pyeong"):
+            continue
+        groups[(r["lawd_cd"], r["apt"], atype)][r["deal_ym"]].append(r["price_per_pyeong"])
+
+    monthly_count = Counter(r["deal_ym"] for r in records)
+    # 아직 며칠 안 지난 달을 고정 건수로 거르면 안 된다. 수집 마지막 달이 하루치
+    # 249건인데 문턱이 200이면 그대로 통과해, 표본 150쌍으로 지수를 움직인다.
+    # 그 수집분의 월 중위 건수에 견줘 판정한다.
+    typical = median(list(monthly_count.values())) if monthly_count else 0
+    floor = typical * min_month_share
+
+    rows = [{"ym": months[0], "index": 100.0, "pairs": None, "thin": False}]
+    cur = 100.0
+    for i in range(1, len(months)):
+        a, b = months[i - 1], months[i]
+        ratios = []
+        for byym in groups.values():
+            if a in byym and b in byym:
+                pa, pb = median(byym[a]), median(byym[b])
+                if pa:
+                    ratios.append(pb / pa)
+        thin = len(ratios) < min_pairs or monthly_count.get(b, 0) < floor
+        # 표본이 없는 달에 값을 지어내지 않는다. 지수를 그대로 두고 사실을 남긴다.
+        if not thin:
+            cur *= median(ratios)
+        rows.append({"ym": b, "index": round(cur, 1), "pairs": len(ratios), "thin": thin})
+
+    # 비교용 원지수(월별 중위 평당가)를 같은 기준으로 눕혀 나란히 싣는다.
+    raw = []
+    base = None
+    for ym in months:
+        vals = [r["price_per_pyeong"] for r in records
+                if r["deal_ym"] == ym and r.get("price_per_pyeong")]
+        m = median(vals) if vals else None
+        if m and base is None:
+            base = m
+        raw.append(round(m / base * 100, 1) if (m and base) else None)
+    for row, v in zip(rows, raw):
+        row["raw_index"] = v
+
+    vals = [r["index"] for r in rows]
+    rawv = [v for v in raw if v is not None]
+    return {
+        "rows": rows,
+        "min_pairs": min_pairs,
+        "min_month_share": min_month_share,
+        "min_month_rows": round(floor),
+        "span_pct": round((max(vals) - min(vals)) / min(vals) * 100, 1) if vals else None,
+        "raw_span_pct": (round((max(rawv) - min(rawv)) / min(rawv) * 100, 1)
+                         if rawv else None),
+    }
+
+
+def cancel_analysis(raw_records, months, min_rows=30, recent_months=12):
+    """해제(취소) 거래를 따로 들여다본다.
+
+    지금까지 해제는 "빼는 것"으로만 다뤘다. 그런데 해제 자체가 신호일 수 있다.
+    보는 각도는 둘이다.
+      - 계약에서 해제까지 걸린 날. 며칠 만에 취소되는지.
+      - 해제된 거래의 값이 같은 단지 x 타입의 정상 거래 중위와 얼마나 달랐는지.
+        높은 값으로 신고했다 취소하면 그 사이 시세가 올라 보인다는 지적이 있는데,
+        이 표는 그 주장을 확인도 반박도 하지 않는다. 다만 "해제된 건이 정상 거래보다
+        높았는가"라는 사실 하나는 잰다. 단순 변심·자금 사정·계약 분쟁이 모두 섞여 있어
+        원인을 가릴 수 없으므로, 이 값을 조작의 증거로 읽으면 안 된다.
+    """
+    live = [r for r in raw_records if not r.get("canceled")]
+    dead = [r for r in raw_records if r.get("canceled")]
+
+    base = defaultdict(list)
+    for r in live:
+        atype = _area_type(r)
+        if atype and r.get("apt") and r.get("amount_manwon") is not None:
+            base[(r["lawd_cd"], r["apt"], atype)].append(r["amount_manwon"])
+    med_base = {k: median(v) for k, v in base.items() if len(v) >= 3}
+
+    gaps, gaps_pct, compared = [], [], 0
+    window = set(months[-recent_months:])
+    for r in dead:
+        if r.get("days_to_cancel") is not None and 0 <= r["days_to_cancel"] <= 900:
+            gaps.append(r["days_to_cancel"])
+        atype = _area_type(r)
+        b = med_base.get((r["lawd_cd"], r.get("apt"), atype))
+        if b and r.get("amount_manwon") is not None and r["deal_ym"] in window:
+            gaps_pct.append((r["amount_manwon"] - b) / b * 100)
+            compared += 1
+
+    by_month = defaultdict(list)
+    for r in dead:
+        if r.get("days_to_cancel") is not None and 0 <= r["days_to_cancel"] <= 900:
+            by_month[r["deal_ym"]].append(r["days_to_cancel"])
+    series = [{"ym": m,
+               "median_days": (round(median(by_month[m])) if len(by_month.get(m, [])) >= min_rows
+                               else None),
+               "count": len(by_month.get(m, []))}
+              for m in months]
+
+    return {
+        "canceled": len(dead),
+        "measured_days": len(gaps),
+        "median_days": round(median(gaps)) if gaps else None,
+        "p25_days": round(quantiles(gaps, n=4)[0]) if len(gaps) >= 4 else None,
+        "p75_days": round(quantiles(gaps, n=4)[2]) if len(gaps) >= 4 else None,
+        "within_30d_pct": (round(sum(1 for g in gaps if g <= 30) / len(gaps) * 100, 1)
+                           if gaps else None),
+        "vs_live_median_pct": round(median(gaps_pct), 1) if gaps_pct else None,
+        "compared": compared,
+        "window": months[-recent_months:],
+        "monthly": series,
+        "min_rows": min_rows,
+    }
+
+
+def umd_breakdown(records, min_deals=10, top_per_region=12):
+    """시군구 안의 법정동별 시세. 지도에서 시군구를 눌렀을 때 한 단계 더 들어간다.
+
+    시군구는 넓다. 같은 구 안에서도 법정동에 따라 배 넘게 갈리는데, 시군구 하나의
+    중위값은 그것을 통째로 뭉갠다. 표본이 얇으면 중위가 튀므로 min_deals 미만은 뺀다.
+    """
+    out = defaultdict(list)
+    for (code, umd), group in _group(records, lambda r: (r["lawd_cd"], r["umd"])).items():
+        if not umd or len(group) < min_deals:
+            continue
+        s = summarize(group)
+        out[code].append({"umd": umd, "count": s["count"], "median_ppp": s["median_ppp"],
+                          "median_amount": s["median_amount"], "avg_area": s["avg_area"]})
+    result = {}
+    for code, rows in out.items():
+        rows.sort(key=lambda r: r["median_ppp"] or 0, reverse=True)
+        result[code] = rows[:top_per_region]
+    return {"regions": result, "min_deals": min_deals, "top_per_region": top_per_region}
+
+
 def complex_shards(records, months):
     """시군구별 단지 x 전용타입 월별 궤적. 관심단지가 필요할 때만 내려받는 조각들.
 
@@ -1013,6 +1164,11 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
         "outside_agent": outside_agent_stats(records, months),
         "party": party_stats(records, months),
         "anomalies": anomaly_flags(records, months),
+        # 월별 중위 평당가는 그달에 무엇이 거래됐는지에 끌려간다. 같은 단지 x 같은
+        # 타입끼리만 견준 지수를 나란히 실어 그 차이를 화면에서 드러낸다.
+        "matched_index": matched_index(records, months),
+        "cancels": cancel_analysis(raw, months),
+        "umd_breakdown": umd_breakdown(records),
         # 재건축 기대는 직거래를 빼고 본다. 시세보다 28.5% 낮게 신고되는 건들이 섞이면
         # 노후 단지의 웃돈이 실제보다 작게 나온다.
         "rebuild": rebuild_premium(broker or records, months),

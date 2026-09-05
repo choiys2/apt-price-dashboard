@@ -19,6 +19,72 @@ from collections import Counter
 from datetime import date
 
 STATE_FILE = "_state.json"
+WATCHLIST_FILE = "watchlist.json"
+
+
+def load_watchlist(path=WATCHLIST_FILE):
+    """저장소에 커밋된 관심단지 목록. 없으면 그냥 건너뛴다.
+
+    대시보드의 관심단지는 브라우저 localStorage 에 있어서 서버 쪽에서는 보이지 않는다.
+    화면을 열지 않아도 관심단지 소식이 오게 하려면 목록이 저장소 안에 있어야 한다.
+    대시보드의 "watchlist.json 복사" 버튼이 이 파일 내용을 그대로 만들어 준다.
+
+    형식: {"items": {"11680|은마|84": {"target": 260000}, ...}}
+    키는 "시군구코드|단지명|전용타입" 이고 target(만원)은 없어도 된다.
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  ! {path} 를 읽지 못했다: {e}", file=sys.stderr)
+        return {}
+    items = data.get("items") if isinstance(data, dict) else None
+    return items if isinstance(items, dict) else {}
+
+
+def watchlist_section(analytics, watch):
+    """관심단지 현황을 브리핑에 붙인다. 목록이 없으면 빈 리스트를 준다."""
+    pi = analytics.get("price_index")
+    if not watch or not pi:
+        return []
+    col = {c: i for i, c in enumerate(pi["columns"])}
+    index = {}
+    for r in pi["rows"]:
+        index[f'{r[col["lawd_cd"]]}|{r[col["apt"]]}|{r[col["area_type"]]}'] = r
+    names = pi.get("region_names", {})
+
+    L = ["## 관심단지", ""]
+    found, missing = [], []
+    for key, meta in watch.items():
+        row = index.get(key)
+        (found if row else missing).append((key, meta, row))
+
+    if found:
+        L.append("| 지역 | 단지 | 전용 | 시세(중위) | 직전 대비 | 거래 | 목표가 |")
+        L.append("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
+        for key, meta, row in found:
+            prev = row[col["prev_median"]]
+            cur = row[col["median_amount"]]
+            chg = fmt_pct(round((cur - prev) / prev * 100, 1)) if prev else "–"
+            target = (meta or {}).get("target")
+            hit = " ✅" if target and cur <= target else ""
+            L.append(f"| {names.get(row[col['lawd_cd']], '')} | {row[col['apt']]} | "
+                     f"{row[col['area_type']]}㎡ | {fmt_amount(cur)} | {chg} | "
+                     f"{row[col['count']]}건 | "
+                     f"{(fmt_amount(target) + hit) if target else '–'} |")
+        L.append("")
+    if missing:
+        # 조용히 빠지면 "내 단지가 안 오르나 보다"로 오해한다. 왜 빠졌는지 밝힌다.
+        L.append(f"- 이번 집계에 거래가 없어 뺀 것 {len(missing)}개: "
+                 + ", ".join(k.split("|")[1] + " " + k.split("|")[2] + "㎡"
+                             for k, _, _ in missing[:8])
+                 + (" 외" if len(missing) > 8 else ""))
+        L.append(f"  (시세는 최근 {len(pi['window'])}개월 중개거래 {pi['min_deals']}건 "
+                 "이상인 단지만 낸다. 거래가 뜸하면 표에서 빠진다)")
+        L.append("")
+    return L
 
 
 def fmt_amount(manwon):
@@ -50,7 +116,7 @@ def delta_line(label, cur, prev, unit="", pct=False):
     return f"{label} **{now}** ({arrow} {abs(diff):,}{unit})"
 
 
-def build(analytics, prev_state):
+def build(analytics, prev_state, watch=None):
     k = analytics["kpi"]
     m = analytics["meta"]
     rh = analytics.get("record_highs") or {}
@@ -173,6 +239,9 @@ def build(analytics, prev_state):
     if any((st, oa, pt, an)):
         L.append("")
 
+    # --- 4c. 관심단지 (저장소에 watchlist.json 이 있을 때만) ---
+    L += watchlist_section(analytics, watch)
+
     # --- 5. 데이터 상태 ---
     L.append("## 데이터 상태")
     L.append("")
@@ -227,7 +296,8 @@ def main():
         except json.JSONDecodeError:
             prev_state = {}
 
-    text, state = build(analytics, prev_state)
+    watch = load_watchlist()
+    text, state = build(analytics, prev_state, watch)
 
     today = date.today()
     name = f"{today.isocalendar().year}-W{today.isocalendar().week:02d}.md"
