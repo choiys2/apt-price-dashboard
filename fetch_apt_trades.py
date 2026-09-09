@@ -305,6 +305,16 @@ def _agent_is_outside(agent, region):
     return not (a.startswith(home) or home.startswith(a))
 
 
+def _norm_dong(text):
+    """동 표기를 숫자만 남긴다. 원본이 '101' 과 '101동' 을 섞어 쓴다(실측으로 둘 다 있다).
+
+    한 글자도 못 뽑으면 None - 빈 문자열을 "0동"처럼 취급하면 실제 0동인 단지와
+    구분이 안 된다.
+    """
+    m = re.match(r"^\s*(\d+)", text or "")
+    return m.group(1) if m else None
+
+
 def normalize(row, lawd_cd):
     """API 원본 dict -> 대시보드 집계용 레코드. 필수값이 없으면 None."""
     amount = _to_int(_first(row, "dealAmount", "거래금액"))          # 만원 단위
@@ -343,6 +353,7 @@ def normalize(row, lawd_cd):
         "deal_day": day,                              # 주간 시계열용
         "agent_sgg": _first(row, "estateAgentSggNm"), # 중개사 소재지 시군구
         "rgst_date": _rgst_date(_first(row, "rgstDate")),
+        "dong": _norm_dong(_first(row, "aptDong")),   # 동(건물) 번호 - 실측 채움률 76.2%
     }
     rec["is_outside_agent"] = _agent_is_outside(rec["agent_sgg"], rec["region"])
     # 계약 -> 등기까지 걸린 날. 등기가 아직 없으면 None 이고, 그 자체가 신호다

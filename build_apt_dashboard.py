@@ -352,6 +352,32 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <div class="dist" id="jeonse"></div>
 </section>
 
+<section class="card" id="renewal-card" style="display:none">
+  <h2>갱신 인상률 (임대차 2법 5% 상한)</h2>
+  <p class="sub" id="renewal-note" style="margin:0 0 14px"></p>
+  <div class="dist wide" id="renewal-split" style="margin-bottom:16px"></div>
+  <div class="table-head" style="margin-bottom:6px">
+    <h2 style="margin:0;font-size:13.5px;color:var(--muted)">월별</h2>
+  </div>
+  <div class="dist" id="renewal-monthly" style="margin-bottom:16px"></div>
+  <div class="table-head" style="margin-bottom:6px">
+    <h2 style="margin:0;font-size:13.5px;color:var(--muted)">상한 초과 비중이 높은 시군구</h2>
+  </div>
+  <div class="dist" id="renewal-regions"></div>
+  <p class="sub" id="renewal-warn" style="margin-top:12px"></p>
+</section>
+
+<section class="card" id="conversion-card" style="display:none">
+  <h2>전월세전환율</h2>
+  <p class="sub" id="conversion-note" style="margin:0 0 14px"></p>
+  <div class="dist" id="conversion-monthly" style="margin-bottom:16px"></div>
+  <div class="table-head" style="margin-bottom:6px">
+    <h2 style="margin:0;font-size:13.5px;color:var(--muted)">전환율이 높은 시군구</h2>
+  </div>
+  <div class="dist" id="conversion-regions"></div>
+  <p class="sub" id="conversion-warn" style="margin-top:12px"></p>
+</section>
+
 <section class="card">
   <h2>거래 형태</h2>
   <div class="dist" id="dealtype"></div>
@@ -543,6 +569,12 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <h2>담은 단지 비교</h2>
   <p class="sub" id="w-slope-note" style="margin:0 0 12px"></p>
   <div id="w-slope"></div>
+</section>
+
+<section class="card" id="w-dong-card" style="display:none">
+  <h2>동(건물)별 시세 편차</h2>
+  <p class="sub" id="w-dong-note" style="margin:0 0 14px"></p>
+  <div id="w-dong"></div>
 </section>
 
 </div><!-- /pane-watch -->
@@ -1584,14 +1616,53 @@ async function ensureShards(lawds){
   return mine === shardSeq;       // 그 사이 목록이 또 바뀌었으면 이 결과는 버린다
 }
 
-// 담은 단지의 월간 궤적. 조각이 없으면 null.
+// 담은 단지의 월간 궤적 + 동별 편차. 조각이 없으면 null.
 function trackOf(k){
   const [lawd, apt, at] = k.split('|');
   const sh = SHARDS[lawd];
   if (!sh || sh === 'fail') return null;
   const hit = sh.rows.find(r => r[0] === apt && String(r[1]) === at);
-  return hit ? {months: sh.months, points: hit[2]} : null;
+  return hit ? {months: sh.months, points: hit[2], dongs: hit[3] || [],
+               minDongDeals: sh.min_dong_deals} : null;
 }
+
+/* ---------- 동(건물)별 시세 편차 ----------
+   aptDong 을 여기서 처음 쓴다. 같은 단지·같은 전용타입 안에서 동마다 중위 평당가를
+   낸다. 실측(수도권): 동당 5건 이상·동이 2개 이상인 7,919개 단지에서 중위 5.4%
+   편차. 조망·향·단지 내 위치 때문일 것으로 보이지만 이 데이터만으로는 원인을 알
+   수 없어 "프리미엄"이 아니라 "편차"라 부른다. */
+function renderWatchDongs(rows){
+  const items = [];
+  for (const {k, row} of rows){
+    if (!row) continue;
+    const t = trackOf(k);
+    if (t && t.dongs.length >= 2)
+      items.push({name: `${row[PIC.apt]} ${row[PIC.area_type]}㎡`, dongs: t.dongs,
+                  minDongDeals: t.minDongDeals});
+  }
+  if (!items.length){ $('#w-dong-card').style.display = 'none'; return; }
+  $('#w-dong-card').style.display = '';
+  $('#w-dong-note').innerHTML =
+    `담은 단지 중 <b style="color:var(--text)">${items.length}개</b>는 동이 2개 이상 잡혀 `
+    + `편차를 볼 수 있다(동당 거래 ${items[0].minDongDeals}건 이상만 낸다). `
+    + `<span class="muted">조망·향·단지 내 위치 때문일 수 있지만 이 데이터만으로는 `
+    + `원인을 알 수 없어 "프리미엄"이 아니라 "편차"라 부른다.</span>`;
+  $('#w-dong').innerHTML = items.map(it => {
+    const max = Math.max(...it.dongs.map(d => d[1]), 1);
+    const lo = it.dongs[it.dongs.length - 1][1], hi = it.dongs[0][1];
+    const spread = lo > 0 ? round1((hi - lo) / lo * 100) : null;
+    return `<div style="margin-bottom:14px">
+        <div style="font-size:13.5px;font-weight:600;margin-bottom:6px">${esc(it.name)}
+          ${spread != null ? `<span class="muted" style="font-weight:400"> · 최고~최저 편차 ${spread}%</span>` : ''}</div>
+        <div class="dist">${it.dongs.map(([dong, ppp, cnt]) => `<div class="dist-row">
+            <div>${esc(dong)}동</div>
+            <div class="track"><div class="fill" style="width:${(ppp/max*100).toFixed(1)}%"></div></div>
+            <div class="dist-val"><b style="color:var(--text)">${nf(ppp)}</b>만원/평 · ${cnt}건</div>
+          </div>`).join('')}</div>
+      </div>`;
+  }).join('');
+}
+function round1(v){ return Math.round(v * 10) / 10; }
 
 function renderWatchTrack(rows){
   const items = [];
@@ -1659,6 +1730,8 @@ function renderWatchTrack(rows){
 }
 
 function renderSlope(rows){
+  // 동별 편차는 궤적과 별개 정보라 슬로프로 떨어지는 것과 무관하게 항상 시도한다.
+  renderWatchDongs(rows);
   // 궤적 조각을 받았으면 그쪽이 낫다. 못 받았을 때만 두 점짜리 슬로프로 떨어진다.
   if (renderWatchTrack(rows)) return;
   const items = rows.filter(r => r.row && changePct(r.row) != null);
@@ -1883,6 +1956,100 @@ function renderJeonse(){
       <div class="dist-val"><b style="color:var(--text)">${r.jeonse_ratio_pct}%</b>
         · 단지 ${nf(r.matched_complexes)}개</div>
     </div>`).join('');
+}
+
+/* ---------- 갱신 인상률 (임대차 2법 5% 상한) ----------
+   전월세 원본의 contractType·preDeposit·useRRRight 를 여기서 처음 쓴다. 인상률은
+   순수 전세끼리 갱신된 건만이라 월세가 섞인 갱신은 애초에 빠져 있다(집계 단계에서). */
+function renderRenewal(){
+  const r = D.renewal_hike;
+  if (!r || r.overall.median_pct == null) return;
+  $('#renewal-card').style.display = '';
+  $('#renewal-note').innerHTML =
+    `순수 전세끼리 갱신된 <b style="color:var(--text)">${nf(r.overall.count)}건</b>에서 `
+    + `인상률 중위 <b style="color:var(--text)">${r.overall.median_pct}%</b> `
+    + `(25~75% ${r.overall.p25_pct}~${r.overall.p75_pct}%) — 법정 상한 `
+    + `${r.cap_pct}%에 몰려 있다. <b style="color:var(--text)">${r.overall.over_cap_pct}%</b>가 `
+    + `그 상한을 넘는다.`;
+
+  const mk = (label, s, color) => `<div class="dist-row">
+      <div>${esc(label)}</div>
+      <div class="track" style="display:flex;flex-direction:column;gap:2px;height:26px;background:none">
+        <div style="flex:1;background:var(--panel-2);border-radius:3px;overflow:hidden">
+          <div class="fill" style="width:${Math.min(s.median_pct ?? 0, 20)/20*100}%;background:${color}"></div></div>
+      </div>
+      <div class="dist-val">중위 <b style="color:var(--text)">${s.median_pct ?? '–'}%</b>
+        · 상한 초과 <b style="color:var(--text)">${s.over_cap_pct ?? '–'}%</b> (${nf(s.count)}건)</div>
+    </div>`;
+  // 상한은 갱신청구권을 "실제로 행사한" 갱신에만 적용된다. 둘을 나란히 보여줘야
+  // "미기재도 다 위반"으로 오해하지 않는다.
+  $('#renewal-split').innerHTML =
+    mk('청구권 사용', r.used_right, 'var(--down)') + mk('사용 미기재', r.not_marked, 'var(--up)');
+
+  const months = r.monthly.filter(m => m.median_pct != null);
+  const maxM = Math.max(...months.map(m => m.median_pct), r.cap_pct, 1);
+  $('#renewal-monthly').innerHTML = months.map(m => `<div class="dist-row">
+      <div>${esc(m.ym)}</div>
+      <div class="track"><div class="fill" style="width:${(m.median_pct/maxM*100).toFixed(1)}%;
+        background:${m.median_pct > r.cap_pct ? 'var(--up)' : 'var(--accent)'}"></div></div>
+      <div class="dist-val"><b style="color:var(--text)">${m.median_pct}%</b>
+        · 상한 초과 ${m.over_cap_pct}% (${nf(m.count)}건)</div>
+    </div>`).join('') || '<p class="sub">표본이 충분한 달이 없다.</p>';
+
+  const regions = r.regions.slice(0, 15);
+  const maxR = Math.max(...regions.map(x => x.over_cap_pct), 1);
+  $('#renewal-regions').innerHTML = regions.map(x => `<div class="dist-row">
+      <div style="font-size:12.5px">${esc(shortName(x.region))}</div>
+      <div class="track"><div class="fill" style="width:${(x.over_cap_pct/maxR*100).toFixed(1)}%;background:var(--up)"></div></div>
+      <div class="dist-val"><b style="color:var(--text)">${x.over_cap_pct}%</b> 초과
+        · 중위 ${x.median_pct}% · ${nf(x.count)}건</div>
+    </div>`).join('') || '<p class="sub">표본 충분한 시군구가 없다.</p>';
+
+  $('#renewal-warn').innerHTML =
+    `<b>상한은 갱신청구권을 실제로 행사한 갱신에만 적용된다.</b> "사용 미기재"는 `
+    + `집주인·세입자가 협의로 조정한 임의 갱신일 수 있어 처음부터 상한 대상이 아니다 — `
+    + `그런데도 인상률이 더 높고 산포도 넓다(위 두 줄 비교). `
+    + `청구권을 쓴 갱신조차 <b style="color:var(--text)">${r.used_right.over_cap_pct}%</b>가 `
+    + `상한을 넘는 것만 실제 위반 후보로 봐야 한다. `
+    + `<span class="muted">계약당사자 사정을 알 수 없어 위반을 확정할 수는 없다.</span>`;
+}
+
+/* ---------- 전월세전환율 ----------
+   전세보증금을 월세로 바꿀 때 적용되는 비율. 한국부동산원이 매달 발표하는 값과
+   같은 방식(단지 x 타입 안에서 전세 중위 보증금 대비 환산)으로 낸다. */
+function renderConversion(){
+  const c = D.rent_conversion;
+  if (!c || c.overall.median_pct == null) return;
+  $('#conversion-card').style.display = '';
+  $('#conversion-note').innerHTML =
+    `월세 계약 ${nf(c.wolse_total)}건 중 짝지을 전세 표본이 있는 `
+    + `<b style="color:var(--text)">${nf(c.matched)}건</b>에서 전환율 중위 `
+    + `<b style="color:var(--text)">${c.overall.median_pct}%</b> `
+    + `(25~75% ${c.overall.p25_pct}~${c.overall.p75_pct}%). `
+    + `같은 단지 × 같은 전용타입의 중위 전세보증금을 기준으로 "이 월세 계약이 전세였다면 `
+    + `냈을 값"으로 환산했다.`;
+
+  const months = c.monthly.filter(m => m.median_pct != null);
+  const maxM = Math.max(...months.map(m => m.median_pct), 1);
+  $('#conversion-monthly').innerHTML = months.map(m => `<div class="dist-row">
+      <div>${esc(m.ym)}</div>
+      <div class="track"><div class="fill" style="width:${(m.median_pct/maxM*100).toFixed(1)}%"></div></div>
+      <div class="dist-val"><b style="color:var(--text)">${m.median_pct}%</b> · ${nf(m.count)}건</div>
+    </div>`).join('') || '<p class="sub">표본이 충분한 달이 없다.</p>';
+
+  const regions = c.regions.slice(0, 15);
+  const maxR = Math.max(...regions.map(x => x.median_pct), 1);
+  $('#conversion-regions').innerHTML = regions.map(x => `<div class="dist-row">
+      <div style="font-size:12.5px">${esc(shortName(x.region))}</div>
+      <div class="track"><div class="fill" style="width:${(x.median_pct/maxR*100).toFixed(1)}%"></div></div>
+      <div class="dist-val"><b style="color:var(--text)">${x.median_pct}%</b> · ${nf(x.count)}건</div>
+    </div>`).join('') || '<p class="sub">표본 충분한 시군구가 없다.</p>';
+
+  $('#conversion-warn').innerHTML =
+    `전환율이 높을수록 세입자가 같은 보증금 차이에 더 많은 월세를 낸다는 뜻이다. `
+    + `법정 상한(기준금리 + 2%p)을 넘는지는 이 표에서 판정하지 않는다 — 실거래가 API 에는 `
+    + `계약 시점의 기준금리가 없어, 상한과 견주려면 그 시점 기준금리를 따로 대야 한다. `
+    + `<span class="muted">30%를 넘는 값은 표본 오류로 보고 제외했다.</span>`;
 }
 
 /* ---------- 거래 형태 ---------- */
@@ -2621,6 +2788,8 @@ if (GEO){ $('#mb-budget').value = BST.budget; $('#mb-area').value = BST.area; }
 renderBudget();
 renderFloorPremium();
 renderJeonse();
+renderRenewal();
+renderConversion();
 renderDealType();
 renderMatchedIndex();
 renderCancels();

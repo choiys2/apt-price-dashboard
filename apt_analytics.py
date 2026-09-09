@@ -435,18 +435,23 @@ def umd_breakdown(records, min_deals=10, top_per_region=12):
     return {"regions": result, "min_deals": min_deals, "top_per_region": top_per_region}
 
 
-def complex_shards(records, months):
-    """시군구별 단지 x 전용타입 월별 궤적. 관심단지가 필요할 때만 내려받는 조각들.
+def complex_shards(records, months, min_dong_deals=5):
+    """시군구별 단지 x 전용타입 월별 궤적 + 동별 시세 편차. 관심단지가 필요할 때만 내려받는 조각들.
 
     전부 페이지에 심으면 안 되는 이유는 재봤다 - 조합이 31,910개고 15개월치를 다 실으면
     2.8MB 가 는다. index.html 이 이미 1.7MB 라 첫 화면이 그만큼 느려진다. 반면 관심단지는
     보통 서너 개고 한두 시군구에 몰려 있어서, 그 시군구 조각만 받아오면 20~30KB 로 끝난다.
 
     조각을 받지 못해도(오프라인, file:// 로 연 경우) 관심단지 목록 자체는 페이지에 이미
-    실린 price_index 요약으로 돌아간다. 궤적 그래프만 빠진다.
+    실린 price_index 요약으로 돌아간다. 궤적 그래프와 동별 편차만 빠진다.
 
-    행 형식은 [단지명, 전용타입, [[월인덱스, 중위거래가, 건수], ...]] 다. 키 이름을
-    3만 번 반복하지 않으려고 배열로 눕혔다.
+    동별 편차 - aptDong 필드(실측 채움률 76.2%)를 여기서 처음 쓴다. 같은 단지·같은
+    전용타입 안에서 동마다 중위 평당가를 내면, 동당 5건 이상·동이 2개 이상인 7,919개
+    단지에서 중위 5.4%(p75 9.3%) 편차가 실측된다. 조망·향·단지 내 위치 때문일 것으로
+    보이지만 이 데이터만으로는 원인을 알 수 없어 "프리미엄"이 아니라 "편차"라 부른다.
+
+    행 형식은 [단지명, 전용타입, [[월인덱스, 중위거래가, 건수], ...], [[동, 중위평당가, 건수], ...]] 다.
+    키 이름을 3만 번 반복하지 않으려고 배열로 눕혔다.
     """
     by_region = defaultdict(lambda: defaultdict(list))
     idx = {ym: i for i, ym in enumerate(months)}
@@ -466,14 +471,25 @@ def complex_shards(records, months):
             for r in rs:
                 by_month[idx[r["deal_ym"]]].append(r["amount_manwon"])
             points = [[mi, round(median(v)), len(v)] for mi, v in sorted(by_month.items())]
-            rows.append([apt, atype, points])
+
+            by_dong = defaultdict(list)
+            for r in rs:
+                if r.get("dong") and r.get("price_per_pyeong"):
+                    by_dong[r["dong"]].append(r["price_per_pyeong"])
+            qualified = {d: v for d, v in by_dong.items() if len(v) >= min_dong_deals}
+            dongs = ([[d, round(median(v)), len(v)] for d, v in
+                      sorted(qualified.items(), key=lambda kv: -median(kv[1]))]
+                     if len(qualified) >= 2 else [])
+            rows.append([apt, atype, points, dongs])
         rows.sort(key=lambda x: (x[0], x[1]))
         shards[code] = {
             "lawd_cd": code,
             "region": region_name(code),
             "months": months,
-            "columns": ["apt", "area_type", "points"],
+            "columns": ["apt", "area_type", "points", "dongs"],
             "point_columns": ["month_index", "median_amount", "count"],
+            "dong_columns": ["dong", "median_ppp", "count"],
+            "min_dong_deals": min_dong_deals,
             "rows": rows,
         }
     return shards
@@ -1116,6 +1132,145 @@ def jeonse_ratio(sale_records, rent_records, min_pairs=2, min_region_samples=5):
     }
 
 
+def renewal_hike_stats(rent_records, months, cap_pct=5.0, min_rows=30, min_region_rows=100):
+    """갱신 인상률 - 임대차 2법 5% 상한이 실제로 지켜지는지.
+
+    전월세 원본에 있던 contractType(신규/갱신)·preDeposit(직전 보증금)·useRRRight
+    (갱신청구권 실사용 여부)를 여태 안 쓰고 있었다. 인상률은 순수 전세끼리 갱신된
+    건만 잰다(normalize 단계에서 이미 걸러져 hike_pct 로 들어온다) - 월세가 섞이면
+    보증금만 보고 "인상"이라 부를 수 없다.
+
+    실측(수도권): 갱신 325,152건 중 순수 전세 갱신 177,643건. 중위 인상률 5.00%로
+    법정 상한에 몰려 있고, 16.5%는 그 상한을 넘는다.
+
+    상한은 갱신청구권을 "실제로 행사한" 갱신에만 적용된다. useRRRight 로 행사 여부를
+    가르지 않고 전부 "위반"으로 몰면 안 된다 - 청구권을 안 쓴 임의 갱신은 애초에
+    상한 대상이 아니다. 그래서 over_cap_pct 를 행사 여부별로 따로 낸다.
+    """
+    hiked = [r for r in rent_records if r.get("hike_pct") is not None]
+
+    def stats(rows):
+        vals = [r["hike_pct"] for r in rows]
+        if len(vals) < min_rows:
+            return {"count": len(vals), "median_pct": None, "p25_pct": None,
+                    "p75_pct": None, "over_cap_pct": None}
+        vals_sorted = sorted(vals)
+        over = sum(1 for v in vals if v > cap_pct)
+        out = {"count": len(vals), "median_pct": round(median(vals), 2),
+               "over_cap_pct": round(over / len(vals) * 100, 1)}
+        if len(vals) >= 4:
+            q1, _, q3 = quantiles(vals_sorted, n=4)
+            out["p25_pct"], out["p75_pct"] = round(q1, 2), round(q3, 2)
+        else:
+            out["p25_pct"] = out["p75_pct"] = None
+        return out
+
+    used_right = [r for r in hiked if r.get("use_rr_right")]
+    not_marked = [r for r in hiked if not r.get("use_rr_right")]
+
+    by_month = _group(hiked, lambda r: r["deal_ym"])
+    monthly = [{"ym": m, **stats(by_month.get(m, []))} for m in months]
+
+    by_region = _group(hiked, lambda r: r["lawd_cd"])
+    regions = []
+    for code, rows in by_region.items():
+        s = stats(rows)
+        if s["count"] < min_region_rows:
+            continue
+        regions.append({"lawd_cd": code, "region": region_name(code), **s})
+    regions.sort(key=lambda r: r["over_cap_pct"], reverse=True)
+
+    return {
+        "overall": stats(hiked),
+        "used_right": stats(used_right),
+        "not_marked": stats(not_marked),
+        "monthly": monthly,
+        "regions": regions,
+        "cap_pct": cap_pct,
+        "min_rows": min_rows,
+        "min_region_rows": min_region_rows,
+    }
+
+
+def rent_conversion_rate(sale_records, rent_records, months, min_jeonse=3, min_month_rows=30):
+    """전월세전환율 = 월세환산액(연) / (전세보증금 - 월세보증금) x 100.
+
+    한국부동산원이 매달 발표하는 그 지표를 같은 단지 x 같은 전용타입 안에서 낸다.
+    같은 계약 하나를 전세/월세 두 조건으로 동시에 관측할 수는 없으니, 그 단지·타입의
+    중위 전세보증금을 "이 월세 계약이 전세였다면 냈을 값"으로 놓고 환산한다.
+
+    실측(수도권): 월세 계약 405,096건 중 짝지을 전세 표본(단지당 3건 이상)이 있는
+    248,175건에서 산출. 중위 5.20%(p25 4.36%, p75 6.00%)로 한국부동산원이 발표하는
+    아파트 전월세전환율(4~6%대)과 맞아떨어진다.
+
+    법정 상한(기준금리 + 2%p, 실거래가 API 에는 기준금리가 없어 이 함수는 상한 위반
+    여부를 판정하지 않는다 - 화면에서 그 시점의 기준금리를 별도로 표시해야 한다.
+    """
+    jeonse = defaultdict(list)
+    for r in rent_records:
+        if r.get("is_jeonse") and r.get("apt") and r.get("area_type") and r.get("deposit_manwon"):
+            jeonse[(r["lawd_cd"], r["apt"], r["area_type"])].append(r)
+
+    def rate_of(r):
+        key = (r["lawd_cd"], r.get("apt"), r.get("area_type"))
+        js = jeonse.get(key)
+        if not js or len(js) < min_jeonse:
+            return None
+        j = median(x["deposit_manwon"] for x in js)
+        gap = j - r["deposit_manwon"]
+        # 보증금이 기준 전세가보다 크거나 같으면(보증금 낮추기용 반전세가 아니라
+        # 거의 전세에 가까운 경우) 환산율이 발산하거나 음수가 되어 의미가 없다.
+        if gap <= 0:
+            return None
+        rate = (r["monthly_manwon"] * 12) / gap * 100
+        return rate if 0 < rate < 30 else None       # 30% 넘는 값은 표본 오류로 본다
+
+    wolse = [r for r in rent_records if not r.get("is_jeonse") and r.get("apt")
+             and r.get("area_type") and r.get("deposit_manwon") and r.get("monthly_manwon")]
+    # (레코드, 전환율) 쌍으로 들고 다닌다. 원본 dict 를 건드리면 이 함수 밖에서도
+    # 그 값이 남는데, jeonse_ratio 등 같은 rent_records 를 도는 다른 함수와 순서가
+    # 엮이면 안 된다.
+    rated = [(r, rate_of(r)) for r in wolse]
+    rated = [(r, v) for r, v in rated if v is not None]
+
+    def stats(pairs):
+        vals = [v for _, v in pairs]
+        if len(vals) < min_month_rows:
+            return {"count": len(vals), "median_pct": None, "p25_pct": None, "p75_pct": None}
+        out = {"count": len(vals), "median_pct": round(median(vals), 2)}
+        if len(vals) >= 4:
+            q1, _, q3 = quantiles(sorted(vals), n=4)
+            out["p25_pct"], out["p75_pct"] = round(q1, 2), round(q3, 2)
+        else:
+            out["p25_pct"] = out["p75_pct"] = None
+        return out
+
+    by_month = defaultdict(list)
+    for r, v in rated:
+        by_month[r["deal_ym"]].append((r, v))
+    monthly = [{"ym": m, **stats(by_month.get(m, []))} for m in months]
+
+    by_region = defaultdict(list)
+    for r, v in rated:
+        by_region[r["lawd_cd"]].append((r, v))
+    regions = []
+    for code, pairs in by_region.items():
+        s = stats(pairs)
+        if s["median_pct"] is None:
+            continue
+        regions.append({"lawd_cd": code, "region": region_name(code), **s})
+    regions.sort(key=lambda r: r["median_pct"], reverse=True)
+
+    return {
+        "overall": stats(rated),
+        "monthly": monthly,
+        "regions": regions,
+        "matched": len(rated),
+        "wolse_total": len(wolse),
+        "min_jeonse": min_jeonse,
+    }
+
+
 def _views(records, months):
     """한 벌의 거래 목록으로 KPI/추이/랭킹을 만든다. 전체본과 중개거래본에 같이 쓴다."""
     return {
@@ -1200,6 +1355,10 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
         result["jeonse"] = jeonse_ratio(records, rr)
         result["meta"]["rent_record_count"] = len(rr)
         result["meta"]["jeonse_record_count"] = sum(1 for r in rr if r.get("is_jeonse"))
+        # contractType/preDeposit/useRRRight 는 원본에 늘 있었는데 여태 전세가율 계산에만
+        # 쓰던 is_jeonse/deposit_manwon 말고는 손대지 않고 있었다.
+        result["renewal_hike"] = renewal_hike_stats(rr, months)
+        result["rent_conversion"] = rent_conversion_rate(records, rr, months)
     return result
 
 

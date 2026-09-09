@@ -66,11 +66,24 @@ def normalize(row, lawd_cd):
         "build_year": _to_int(_first(row, "buildYear", "건축년도")),
         "contract_type": _first(row, "contractType"),   # 신규 / 갱신
         "contract_term": _first(row, "contractTerm"),
+        # 갱신청구권을 "실제로 행사했는지" 여부. 임대차 2법의 5% 인상 상한은 이 권리를
+        # 쓴 갱신에만 적용되므로, 상한 준수를 재려면 이 구분이 있어야 한다.
+        "use_rr_right": (_first(row, "useRRRight") or "").strip() == "사용",
     }
     if area and monthly == 0:
         rec["deposit_per_pyeong"] = round(deposit / (area / PYEONG_PER_M2))
     else:
         rec["deposit_per_pyeong"] = None
+
+    pre_deposit = _to_int(_first(row, "preDeposit"))
+    pre_monthly = _to_int(_first(row, "preMonthlyRent")) or 0
+    rec["pre_deposit_manwon"] = pre_deposit
+    # 인상률은 순수 전세(월세 0) 갱신끼리만 낸다. 월세가 섞이면 보증금만 보고
+    # "인상"이라 부를 수 없다 - 월세를 낮추며 보증금을 올린 것일 수도 있다.
+    rec["hike_pct"] = None
+    if (rec["contract_type"] == "갱신" and pre_deposit and pre_deposit > 0
+            and monthly == 0 and pre_monthly == 0):
+        rec["hike_pct"] = round((deposit - pre_deposit) / pre_deposit * 100, 2)
     return rec
 
 

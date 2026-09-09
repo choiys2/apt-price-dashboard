@@ -6,9 +6,10 @@ from apt_analytics import (
     PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym,
     _same_month_last_year, analyze, area_distribution, build_kpi, cancel_rate_series,
     deal_type_stats, missing_regions, monthly_series, record_highs, reference_month,
-    anomaly_flags, cancel_analysis, complex_histories, floor_premium, jeonse_ratio,
-    matched_index, outside_agent_stats, party_stats, region_monthly, region_ranking,
-    settlement_series, summarize, umd_breakdown, umd_ranking, week_anchor, weekly_series,
+    anomaly_flags, cancel_analysis, complex_histories, complex_shards, floor_premium,
+    jeonse_ratio, matched_index, outside_agent_stats, party_stats, region_monthly,
+    region_ranking, renewal_hike_stats, rent_conversion_rate, settlement_series,
+    summarize, umd_breakdown, umd_ranking, week_anchor, weekly_series,
 )
 
 
@@ -814,6 +815,185 @@ class UmdBreakdownTest(unittest.TestCase):
             rows += [rec("2026-06", 1000 + i, umd=f"동{i}") for _ in range(10)]
         out = umd_breakdown(rows, min_deals=10, top_per_region=5)
         self.assertEqual(len(out["regions"]["11680"]), 5)
+
+
+def rent_rec(ym, deposit, monthly=0, apt="가", code="11680", atype=84,
+             ctype=None, pre_deposit=None, pre_monthly=0, use_rr=False):
+    """전월세 정규화 레코드 흉내. hike_pct 는 fetch_apt_rents.normalize() 와 같은
+    규칙(순수 전세끼리 갱신된 것만)으로 여기서 미리 계산해 둔다."""
+    hike = None
+    if ctype == "갱신" and pre_deposit and monthly == 0 and pre_monthly == 0:
+        hike = round((deposit - pre_deposit) / pre_deposit * 100, 2)
+    return {
+        "lawd_cd": code, "region": "서울특별시 강남구" if code == "11680" else "경기도 성남시 분당구",
+        "apt": apt, "area_type": atype, "deposit_manwon": deposit, "monthly_manwon": monthly,
+        "is_jeonse": monthly == 0, "deal_ym": ym, "contract_type": ctype,
+        "use_rr_right": use_rr, "pre_deposit_manwon": pre_deposit, "hike_pct": hike,
+    }
+
+
+class RenewalHikeTest(unittest.TestCase):
+    """갱신 인상률 - contractType/preDeposit/useRRRight 를 처음 쓰는 부분."""
+
+    MONTHS = ["2026-05", "2026-06"]
+
+    def test_median_and_over_cap_share(self):
+        rows = ([rent_rec("2026-06", 10500, ctype="갱신", pre_deposit=10000) for _ in range(20)]
+                + [rent_rec("2026-06", 11000, ctype="갱신", pre_deposit=10000) for _ in range(20)])
+        out = renewal_hike_stats(rows, self.MONTHS, min_rows=10, min_region_rows=10)
+        self.assertEqual(out["overall"]["count"], 40)
+        self.assertAlmostEqual(out["overall"]["median_pct"], 7.5, places=1)
+        self.assertEqual(out["overall"]["over_cap_pct"], 50.0)   # 10% 짜리만 5% 초과
+
+    def test_used_right_and_not_marked_are_split(self):
+        rows = ([rent_rec("2026-06", 10500, ctype="갱신", pre_deposit=10000, use_rr=True)
+                for _ in range(15)]
+                + [rent_rec("2026-06", 12000, ctype="갱신", pre_deposit=10000, use_rr=False)
+                  for _ in range(15)])
+        out = renewal_hike_stats(rows, self.MONTHS, min_rows=10, min_region_rows=10)
+        self.assertEqual(out["used_right"]["median_pct"], 5.0)
+        self.assertEqual(out["used_right"]["over_cap_pct"], 0.0)
+        self.assertEqual(out["not_marked"]["median_pct"], 20.0)
+        self.assertEqual(out["not_marked"]["over_cap_pct"], 100.0)
+
+    def test_mixed_monthly_rent_renewal_has_no_hike(self):
+        # 월세가 섞인 갱신은 애초에 hike_pct 가 없다(rent_rec 헬퍼가 그대로 흉내낸다) -
+        # 보증금만 보고 "인상"이라 부르면 안 되기 때문이다.
+        rows = [rent_rec("2026-06", 15000, monthly=50, ctype="갱신",
+                         pre_deposit=10000, pre_monthly=0) for _ in range(20)]
+        out = renewal_hike_stats(rows, self.MONTHS, min_rows=5, min_region_rows=5)
+        self.assertEqual(out["overall"]["count"], 0)
+
+    def test_new_contracts_are_ignored(self):
+        rows = [rent_rec("2026-06", 10000, ctype="신규") for _ in range(20)]
+        out = renewal_hike_stats(rows, self.MONTHS, min_rows=5, min_region_rows=5)
+        self.assertEqual(out["overall"]["count"], 0)
+
+    def test_thin_month_reports_none_not_zero(self):
+        rows = [rent_rec("2026-06", 10500, ctype="갱신", pre_deposit=10000) for _ in range(5)]
+        out = renewal_hike_stats(rows, self.MONTHS, min_rows=30, min_region_rows=30)
+        self.assertIsNone(out["overall"]["median_pct"])
+        self.assertEqual(out["regions"], [])
+
+    def test_regions_sorted_by_over_cap_descending(self):
+        rows = ([rent_rec("2026-06", 12000, ctype="갱신", pre_deposit=10000, code="11680")
+                for _ in range(15)]
+                + [rent_rec("2026-06", 10200, ctype="갱신", pre_deposit=10000, code="41135")
+                  for _ in range(15)])
+        out = renewal_hike_stats(rows, self.MONTHS, min_rows=10, min_region_rows=10)
+        self.assertEqual(out["regions"][0]["lawd_cd"], "11680")
+
+
+class RentConversionTest(unittest.TestCase):
+    """전월세전환율 - 전세 중위 보증금을 기준으로 월세를 환산한다."""
+
+    MONTHS = ["2026-05", "2026-06"]
+
+    def test_matches_known_formula(self):
+        # 전세 기준 1억, 월세 보증금 4억에 월 250 -> (250*12)/(100000-40000)*100 = 5.0%
+        rows = [rent_rec("2026-01", 100000) for _ in range(5)]
+        rows += [rent_rec("2026-06", 40000, monthly=250) for _ in range(35)]
+        out = rent_conversion_rate([], rows, self.MONTHS, min_jeonse=3, min_month_rows=10)
+        self.assertEqual(out["overall"]["median_pct"], 5.0)
+
+    def test_needs_enough_jeonse_peers(self):
+        rows = [rent_rec("2026-01", 100000) for _ in range(2)]     # min_jeonse=3 미만
+        rows += [rent_rec("2026-06", 4000, monthly=250) for _ in range(10)]
+        out = rent_conversion_rate([], rows, self.MONTHS, min_jeonse=3, min_month_rows=5)
+        self.assertEqual(out["matched"], 0)
+
+    def test_deposit_above_jeonse_baseline_is_excluded(self):
+        # 월세 보증금이 기준 전세가보다 크면 환산율이 발산하거나 음수가 된다 - 뺀다.
+        rows = [rent_rec("2026-01", 100000) for _ in range(5)]
+        rows += [rent_rec("2026-06", 150000, monthly=10) for _ in range(10)]
+        out = rent_conversion_rate([], rows, self.MONTHS, min_jeonse=3, min_month_rows=5)
+        self.assertEqual(out["matched"], 0)
+
+    def test_different_complexes_do_not_mix(self):
+        rows = [rent_rec("2026-01", 100000, apt="가") for _ in range(5)]
+        rows += [rent_rec("2026-06", 4000, monthly=250, apt="가") for _ in range(15)]
+        rows += [rent_rec("2026-06", 4000, monthly=250, apt="나") for _ in range(15)]  # 짝 없음
+        out = rent_conversion_rate([], rows, self.MONTHS, min_jeonse=3, min_month_rows=10)
+        self.assertEqual(out["matched"], 15)
+
+    def test_monthly_series_aligns_with_input_months(self):
+        rows = [rent_rec("2026-05", 100000) for _ in range(5)]
+        rows += [rent_rec("2026-05", 4000, monthly=250) for _ in range(10)]
+        out = rent_conversion_rate([], rows, self.MONTHS, min_jeonse=3, min_month_rows=5)
+        self.assertEqual([m["ym"] for m in out["monthly"]], self.MONTHS)
+        self.assertIsNotNone(out["monthly"][0]["median_pct"])
+        self.assertIsNone(out["monthly"][1]["median_pct"])
+
+
+class ComplexShardDongTest(unittest.TestCase):
+    """동별 시세 편차 - aptDong 필드를 처음 쓰는 부분. complex_shards 의 4번째 열."""
+
+    MONTHS = ["2026-06"]
+
+    def _rows(self, ym, ppp, dong, n, apt="은마", area=84.0):
+        return [dict(rec(ym, ppp, area=area), apt=apt, dong=dong) for _ in range(n)]
+
+    def test_two_dongs_with_enough_samples_are_reported(self):
+        rows = self._rows("2026-06", 9000, "101", 5) + self._rows("2026-06", 7000, "102", 5)
+        shards = complex_shards(rows, self.MONTHS, min_dong_deals=5)
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "은마")
+        dongs = {d: (ppp, cnt) for d, ppp, cnt in row[3]}
+        self.assertEqual(dongs["101"], (9000, 5))
+        self.assertEqual(dongs["102"], (7000, 5))
+
+    def test_sorted_high_to_low(self):
+        rows = (self._rows("2026-06", 7000, "102", 5) + self._rows("2026-06", 9000, "101", 5)
+                + self._rows("2026-06", 8000, "103", 5))
+        shards = complex_shards(rows, self.MONTHS, min_dong_deals=5)
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "은마")
+        self.assertEqual([d for d, _, _ in row[3]], ["101", "103", "102"])
+
+    def test_single_dong_is_not_a_spread(self):
+        # 동이 하나뿐이면 "편차"라는 말 자체가 성립하지 않는다.
+        rows = self._rows("2026-06", 9000, "101", 20)
+        shards = complex_shards(rows, self.MONTHS, min_dong_deals=5)
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "은마")
+        self.assertEqual(row[3], [])
+
+    def test_thin_dong_excluded_but_others_kept(self):
+        rows = (self._rows("2026-06", 9000, "101", 8) + self._rows("2026-06", 7000, "102", 8)
+                + self._rows("2026-06", 20000, "103", 2))    # 동당 5건 미만
+        shards = complex_shards(rows, self.MONTHS, min_dong_deals=5)
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "은마")
+        self.assertEqual({d for d, _, _ in row[3]}, {"101", "102"})
+
+    def test_missing_dong_field_does_not_crash(self):
+        rows = [dict(rec("2026-06", 9000), apt="가") for _ in range(10)]   # dong 없음
+        shards = complex_shards(rows, self.MONTHS, min_dong_deals=5)
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "가")
+        self.assertEqual(row[3], [])
+
+    def test_points_and_dongs_share_the_same_row(self):
+        # 궤적(points)과 편차(dongs)가 [단지, 타입, points, dongs] 한 행에 같이 실려야
+        # 프런트에서 한 번의 조회로 둘 다 얻는다.
+        rows = self._rows("2026-06", 9000, "101", 5) + self._rows("2026-06", 7000, "102", 5)
+        shards = complex_shards(rows, self.MONTHS, min_dong_deals=5)
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "은마")
+        self.assertEqual(shards["11680"]["columns"], ["apt", "area_type", "points", "dongs"])
+        self.assertTrue(len(row[2]) >= 1)     # points 도 여전히 채워진다
+        self.assertTrue(len(row[3]) == 2)
+
+
+class RentAnalyticsInAnalyzeTest(unittest.TestCase):
+    def test_analyze_carries_renewal_and_conversion_when_rent_given(self):
+        sale = [rec("2026-06", 5000) for _ in range(20)]
+        rent = ([rent_rec("2026-06", 10500, ctype="갱신", pre_deposit=10000) for _ in range(10)]
+                + [rent_rec("2026-01", 100000) for _ in range(5)]
+                + [rent_rec("2026-06", 4000, monthly=250) for _ in range(10)])
+        out = analyze({"meta": {}, "records": sale},
+                      rent_payload={"records": rent})
+        self.assertIn("renewal_hike", out)
+        self.assertIn("rent_conversion", out)
+
+    def test_absent_without_rent_payload(self):
+        out = analyze({"meta": {}, "records": [rec("2026-06", 5000)]})
+        self.assertNotIn("renewal_hike", out)
+        self.assertNotIn("rent_conversion", out)
 
 
 if __name__ == "__main__":

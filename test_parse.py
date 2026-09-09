@@ -309,5 +309,76 @@ class NewFieldsNormalizeTest(unittest.TestCase):
         self.assertIsNone(r["days_to_cancel"])
 
 
+class DongNormalizeTest(unittest.TestCase):
+    """동(건물) 번호 파싱. 원본이 '101' 과 '101동' 을 섞어 쓴다(실측으로 둘 다 있다)."""
+
+    ROW = {**NewFieldsNormalizeTest.ROW}
+
+    def test_bare_number(self):
+        self.assertEqual(fetch._norm_dong("101"), "101")
+
+    def test_with_suffix(self):
+        self.assertEqual(fetch._norm_dong("101동"), "101")
+
+    def test_blank_is_none_not_a_fake_zero(self):
+        # 빈 문자열을 "0동"처럼 취급하면 실제 0동인 단지와 구분이 안 된다.
+        for bad in ("", "   ", None, "동"):
+            self.assertIsNone(fetch._norm_dong(bad), f"{bad!r} 을 통과시켰다")
+
+    def test_normalize_carries_dong(self):
+        r = normalize({**self.ROW, "aptDong": "205동"}, "11680")
+        self.assertEqual(r["dong"], "205")
+
+    def test_normalize_missing_dong_is_none(self):
+        r = normalize({**self.ROW, "aptDong": ""}, "11680")
+        self.assertIsNone(r["dong"])
+
+
+class RentNormalizeTest(unittest.TestCase):
+    """전월세 정규화. contractType/preDeposit/useRRRight 를 여기서 처음 쓴다."""
+
+    ROW = {
+        "sggCd": "11680", "umdNm": "대치동", "aptNm": "테스트", "excluUseAr": "84.97",
+        "deposit": "50,000", "monthlyRent": "0",
+        "dealYear": "2026", "dealMonth": "6", "dealDay": "10",
+        "floor": "5", "buildYear": "2003",
+        "contractType": "갱신", "contractTerm": "24.24",
+        "useRRRight": "사용", "preDeposit": "45,000", "preMonthlyRent": "0",
+    }
+
+    def test_carries_new_fields(self):
+        import fetch_apt_rents as rents
+        r = rents.normalize(self.ROW, "11680")
+        self.assertTrue(r["use_rr_right"])
+        self.assertEqual(r["pre_deposit_manwon"], 45000)
+
+    def test_hike_pct_for_pure_jeonse_renewal(self):
+        import fetch_apt_rents as rents
+        r = rents.normalize(self.ROW, "11680")
+        self.assertAlmostEqual(r["hike_pct"], (50000 - 45000) / 45000 * 100, places=2)
+
+    def test_hike_pct_none_when_monthly_rent_is_mixed_in(self):
+        # 보증금만 보고 "인상"이라 부르면 안 된다 - 월세를 낮추며 보증금을 올렸을 수도 있다.
+        import fetch_apt_rents as rents
+        r = rents.normalize({**self.ROW, "monthlyRent": "30"}, "11680")
+        self.assertIsNone(r["hike_pct"])
+
+    def test_hike_pct_none_for_new_contract(self):
+        import fetch_apt_rents as rents
+        r = rents.normalize({**self.ROW, "contractType": "신규"}, "11680")
+        self.assertIsNone(r["hike_pct"])
+
+    def test_hike_pct_none_without_pre_deposit(self):
+        import fetch_apt_rents as rents
+        r = rents.normalize({**self.ROW, "preDeposit": ""}, "11680")
+        self.assertIsNone(r["hike_pct"])
+        self.assertIsNone(r["pre_deposit_manwon"])
+
+    def test_use_rr_right_false_when_not_marked(self):
+        import fetch_apt_rents as rents
+        r = rents.normalize({**self.ROW, "useRRRight": ""}, "11680")
+        self.assertFalse(r["use_rr_right"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
