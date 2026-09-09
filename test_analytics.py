@@ -3,7 +3,7 @@
 import unittest
 
 from apt_analytics import (
-    PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym,
+    PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym, _sido_split,
     _same_month_last_year, analyze, area_distribution, build_kpi, cancel_rate_series,
     deal_type_stats, missing_regions, monthly_series, record_highs, reference_month,
     anomaly_flags, cancel_analysis, complex_histories, complex_shards, floor_premium,
@@ -994,6 +994,146 @@ class RentAnalyticsInAnalyzeTest(unittest.TestCase):
         out = analyze({"meta": {}, "records": [rec("2026-06", 5000)]})
         self.assertNotIn("renewal_hike", out)
         self.assertNotIn("rent_conversion", out)
+
+
+SIDO_REGION = {
+    "서울특별시": ("11680", "서울특별시 강남구"),
+    "인천광역시": ("28200", "인천광역시 남동구"),
+    "경기도": ("41135", "경기도 성남시 분당구"),
+}
+
+
+def sido_deal(ym, amount, sido, apt="가나아파트", area=84.9, gbn="중개거래", floor=5, canceled=False):
+    code, region = SIDO_REGION[sido]
+    ppp = round(amount / (area / PYEONG))
+    return {
+        "lawd_cd": code, "region": region, "umd": "역삼동", "apt": apt, "area_m2": area,
+        "amount_manwon": amount, "deal_ym": ym, "deal_date": f"{ym}-15",
+        "price_per_pyeong": ppp, "price_per_m2": round(amount / area, 2),
+        "canceled": canceled, "floor": floor, "area_type": int(area),
+        "deal_gbn": gbn, "is_broker": gbn != "직거래",
+    }
+
+
+def sido_rent(ym, deposit, sido, monthly=0, apt="가나아파트", atype=84):
+    code, region = SIDO_REGION[sido]
+    return {
+        "lawd_cd": code, "region": region, "apt": apt, "area_type": atype,
+        "deposit_manwon": deposit, "monthly_manwon": monthly, "is_jeonse": monthly == 0,
+        "deal_ym": ym, "contract_type": None, "use_rr_right": False,
+        "pre_deposit_manwon": None, "hike_pct": None,
+    }
+
+
+class SidoSplitTest(unittest.TestCase):
+    def test_splits_by_leading_sido_token(self):
+        recs = [sido_deal("2026-06", 100000, "서울특별시"),
+                sido_deal("2026-06", 90000, "인천광역시"),
+                sido_deal("2026-06", 80000, "경기도"),
+                {**sido_deal("2026-06", 70000, "서울특별시"), "region": "세종특별자치시 어딘가"}]
+        out = _sido_split(recs)
+        self.assertEqual(len(out["서울특별시"]), 1)
+        self.assertEqual(len(out["인천광역시"]), 1)
+        self.assertEqual(len(out["경기도"]), 1)
+        # 수도권 3개 시도가 아닌 레코드는 어느 쪽에도 담기지 않는다(버려지는 게 맞다 -
+        # sido 탭 자체가 수도권 3개뿐이라 집계에 넣을 곳이 없다).
+        self.assertEqual(sum(len(v) for v in out.values()), 3)
+
+    def test_empty_input(self):
+        out = _sido_split([])
+        self.assertEqual(out, {"서울특별시": [], "인천광역시": [], "경기도": []})
+
+
+class AnalyzeBySidoTest(unittest.TestCase):
+    """개요 탭에서 시도 칩을 누르면 카드 숫자도 그 시도만 반영해야 한다.
+
+    analyze() 가 sido 별로 같은 집계 함수를 다시 돌려 "by_sido" 를 붙였는지 확인한다.
+    개별 지표의 통계 로직 자체는 각자의 전용 테스트(RenewalHikeTest 등)가 이미
+    지키고 있으므로, 여기서는 (1) 값이 실제로 그 시도만으로 다시 계산됐는지와
+    (2) 13개 지표 모두 배선이 빠짐없이 됐는지만 본다.
+    """
+
+    def _payload(self):
+        sale = ([sido_deal("2026-06", 100000 + i * 100, "서울특별시") for i in range(20)]
+                + [sido_deal("2026-06", 80000 + i * 100, "경기도") for i in range(15)]
+                + [sido_deal("2026-06", 60000 + i * 100, "인천광역시") for i in range(8)]
+                + [sido_deal("2026-05", 100000, "서울특별시", canceled=True)])
+        rent = ([sido_rent("2026-06", 30000 + i * 100, "서울특별시") for i in range(10)]
+                + [sido_rent("2026-06", 20000 + i * 100, "경기도") for i in range(6)])
+        return {"meta": {}, "records": sale}, {"records": rent}
+
+    def test_area_distribution_by_sido_is_scoped_to_that_sido(self):
+        payload, _ = self._payload()
+        result = analyze(payload)
+        ad = result["area_distribution"]
+        self.assertEqual(sum(b["count"] for b in ad["buckets"]), 43)   # 20+15+8, 해제건 제외
+        seoul = sum(b["count"] for b in ad["by_sido"]["서울특별시"])
+        self.assertEqual(seoul, 20)
+        self.assertLess(seoul, sum(b["count"] for b in ad["buckets"]))  # 전체 복사본이 아니다
+        self.assertEqual(set(ad["by_sido"]), {"서울특별시", "인천광역시", "경기도"})
+
+    def test_deal_type_by_sido_is_scoped_to_that_sido(self):
+        payload, _ = self._payload()
+        result = analyze(payload)
+        gg = result["deal_type"]["by_sido"]["경기도"]
+        self.assertEqual(gg["broker"]["count"] + gg["direct"]["count"], 15)
+
+    def test_all_thirteen_metrics_carry_by_sido(self):
+        payload, rent_payload = self._payload()
+        result = analyze(payload, rent_payload=rent_payload)
+        sale_keys = ["area_distribution", "deal_type", "settlement", "party", "anomalies",
+                     "matched_index", "cancels", "rebuild", "record_highs", "floor_premium"]
+        for key in sale_keys:
+            self.assertIn("by_sido", result[key], key)
+            self.assertTrue(set(result[key]["by_sido"]) <= {"서울특별시", "인천광역시", "경기도"}, key)
+            # 표본이 있던 세 시도는 모두 채워진다(내부 최소표본 미달로 통계값이 null이
+            # 되는 것과, by_sido 자체가 안 채워지는 것은 다른 문제다).
+            self.assertEqual(set(result[key]["by_sido"]),
+                              {"서울특별시", "인천광역시", "경기도"}, key)
+
+        rent_keys = ["jeonse", "renewal_hike", "rent_conversion"]
+        for key in rent_keys:
+            self.assertIn("by_sido", result[key], key)
+            # 인천은 전월세 표본을 안 줬으니 by_sido 에 들어갈 수 없다.
+            self.assertNotIn("인천광역시", result[key]["by_sido"], key)
+            self.assertIn("서울특별시", result[key]["by_sido"], key)
+            self.assertIn("경기도", result[key]["by_sido"], key)
+
+    def test_rent_metrics_absent_by_sido_without_rent_payload(self):
+        payload, _ = self._payload()
+        result = analyze(payload)
+        self.assertNotIn("jeonse", result)
+        self.assertNotIn("renewal_hike", result)
+        self.assertNotIn("rent_conversion", result)
+
+
+class ComplexHistoryUnionAcrossSidoTest(unittest.TestCase):
+    """신고가 표의 행을 펼치면 거래 궤적이 뜬다. 전체 보기에서 top_n 에 못 든 단지도
+    특정 시도로 좁혀 보면 그 시도 안에서는 상위권에 들 수 있다 - 그 행의 키도
+    complex_history 에 실려 있어야 펼치기가 "이력 없음"으로 깨지지 않는다."""
+
+    def test_every_sido_variant_high_low_key_has_history(self):
+        months = ["2026-03", "2026-04", "2026-05", "2026-06"]
+        # 인천에 신고가를 하나 심는다(4건 거래, 마지막 달에 이전 최고가 경신).
+        incheon_high = [sido_deal("2026-03", 90000, "인천광역시", apt="한들아파트"),
+                         sido_deal("2026-04", 92000, "인천광역시", apt="한들아파트"),
+                         sido_deal("2026-05", 91000, "인천광역시", apt="한들아파트"),
+                         sido_deal("2026-06", 95000, "인천광역시", apt="한들아파트")]
+        filler = [sido_deal(m, 100000, "서울특별시", apt=f"채움{i}") for i, m in enumerate(months)]
+        payload = {"meta": {}, "records": incheon_high + filler}
+        result = analyze(payload)
+
+        all_rh = [result["record_highs"]] + list(result["record_highs"]["by_sido"].values())
+        code_by_region = {r["region"]: r["lawd_cd"] for r in payload["records"]}
+        missing = []
+        for one in all_rh:
+            for r in one["highs"] + one["lows"]:
+                key = f"{code_by_region[r['region']]}|{r['apt']}|{r['area_type']}"
+                if key not in result["complex_history"]:
+                    missing.append(key)
+        self.assertEqual(missing, [])
+        # 인천 조각에는 실제로 신고가가 하나 잡혀 있어야 이 테스트 자체가 의미가 있다.
+        self.assertGreaterEqual(result["record_highs"]["by_sido"]["인천광역시"]["high_count"], 1)
 
 
 if __name__ == "__main__":

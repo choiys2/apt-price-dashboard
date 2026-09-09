@@ -325,12 +325,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
   </div>
   <p class="sub" id="rhnote" style="margin:0 0 12px"></p>
   <div class="scroll"><table class="rh">
-    <thead><tr>
-      <th style="cursor:default">계약일</th><th style="cursor:default">지역</th>
-      <th style="cursor:default">단지</th><th style="cursor:default">전용</th>
-      <th style="cursor:default">층</th><th style="cursor:default">거래가</th>
-      <th style="cursor:default">직전 기록</th><th style="cursor:default">갱신폭</th>
-    </tr></thead>
+    <thead><tr id="rh-thr"></tr></thead>
     <tbody id="rhbody"></tbody>
   </table></div>
 </section>
@@ -349,6 +344,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
 <section class="card" id="jeonse-card" style="display:none">
   <h2>전세가율 (전세보증금 / 매매가)</h2>
   <p class="sub" id="jeonse-note" style="margin:0 0 12px"></p>
+  <div class="filters" style="margin:0 0 10px" id="jeonse-sort"></div>
   <div class="dist" id="jeonse"></div>
 </section>
 
@@ -361,7 +357,8 @@ footer ul{padding-left:18px;margin:8px 0 0}
   </div>
   <div class="dist" id="renewal-monthly" style="margin-bottom:16px"></div>
   <div class="table-head" style="margin-bottom:6px">
-    <h2 style="margin:0;font-size:13.5px;color:var(--muted)">상한 초과 비중이 높은 시군구</h2>
+    <h2 style="margin:0;font-size:13.5px;color:var(--muted)">시군구</h2>
+    <div class="filters" style="margin:0" id="renewal-region-sort"></div>
   </div>
   <div class="dist" id="renewal-regions"></div>
   <p class="sub" id="renewal-warn" style="margin-top:12px"></p>
@@ -372,7 +369,8 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <p class="sub" id="conversion-note" style="margin:0 0 14px"></p>
   <div class="dist" id="conversion-monthly" style="margin-bottom:16px"></div>
   <div class="table-head" style="margin-bottom:6px">
-    <h2 style="margin:0;font-size:13.5px;color:var(--muted)">전환율이 높은 시군구</h2>
+    <h2 style="margin:0;font-size:13.5px;color:var(--muted)">시군구</h2>
+    <div class="filters" style="margin:0" id="conversion-region-sort"></div>
   </div>
   <div class="dist" id="conversion-regions"></div>
   <p class="sub" id="conversion-warn" style="margin-top:12px"></p>
@@ -397,6 +395,11 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <p class="sub" id="party-note" style="margin:0 0 14px"></p>
   <div class="dist wide" id="party"></div>
   <div id="party-chart" style="margin-top:16px"></div>
+  <div class="table-head" style="margin:18px 0 8px">
+    <h2 style="margin:0;font-size:13.5px;color:var(--muted)">시군구별 법인 매도·매수</h2>
+    <div class="filters" style="margin:0" id="party-region-sort"></div>
+  </div>
+  <div class="dist" id="party-regions"></div>
   <p class="sub" id="party-foot" style="margin-top:10px"></p>
 </section>
 
@@ -408,13 +411,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
     <h2 style="margin:0;font-size:14px">같은 법정동 새 아파트 대비 웃돈이 큰 노후 단지</h2>
   </div>
   <div class="scroll tall"><table class="rh">
-    <thead><tr>
-      <th style="cursor:default"></th><th style="cursor:default">지역</th>
-      <th style="cursor:default">단지</th><th style="cursor:default">전용</th>
-      <th style="cursor:default">준공</th><th style="cursor:default">평당가</th>
-      <th style="cursor:default">동네 기준</th><th style="cursor:default">웃돈</th>
-      <th style="cursor:default">거래</th>
-    </tr></thead>
+    <thead><tr id="rebuild-thr"></tr></thead>
     <tbody id="rebuild-body"></tbody>
   </table></div>
   <p class="sub" id="rebuild-warn" style="margin-top:12px"></p>
@@ -427,12 +424,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
   </div>
   <p class="sub" id="anom-note" style="margin:0 0 12px"></p>
   <div class="scroll tall"><table class="rh">
-    <thead><tr>
-      <th style="cursor:default">계약일</th><th style="cursor:default">지역</th>
-      <th style="cursor:default">단지</th><th style="cursor:default">전용</th>
-      <th style="cursor:default">거래가</th><th style="cursor:default">단지 시세</th>
-      <th style="cursor:default">괴리</th><th style="cursor:default">신호</th>
-    </tr></thead>
+    <thead><tr id="anom-thr"></tr></thead>
     <tbody id="anom-body"></tbody>
   </table></div>
   <p class="sub" id="anom-warn" style="margin-top:12px"></p>
@@ -631,6 +623,13 @@ let sortKey = 'median_ppp', sortDir = -1;
 let query = '';
 let dealType = 'all';          // 'all' | 'broker' (직거래 제외)
 let rhTab = 'highs';           // 'highs' | 'lows'
+const rhSort = {key: null, dir: -1};
+const rebuildSort = {key: null, dir: -1};
+const anomSort = {key: null, dir: -1};
+const jeonseSort = {key: 'jeonse_ratio_pct', dir: -1};
+const renewalSort = {key: 'over_cap_pct', dir: -1};
+const conversionSort = {key: 'median_pct', dir: -1};
+const partySort = {key: 'net_corp_sell_pct', dir: -1};
 let chartMode = 'month';       // 'month' | 'week'
 // 예산 조건은 개요의 "예산으로 찾기"와 지도의 "예산 도달률"이 함께 쓴다.
 // 두 화면이 서로 다른 예산을 보고 있으면 같은 질문에 다른 답이 나온다.
@@ -638,6 +637,13 @@ const BST = {budget: 80000, area: 84};
 
 // 전체본과 중개거래본은 같은 모양이라 뷰만 갈아끼운다.
 function V(){ return (dealType === 'broker' && D.broker) ? D.broker : D; }
+
+// 시도 탭을 고르면 그 값만 담은 같은 모양의 구조체로 갈아끼운다. by_sido 가 없거나
+// 그 시도 표본이 모자라 못 낸 지표는 전체값을 그대로 보여준다(없는 값을 지어내지 않는다).
+function byS(obj){
+  if (!obj || sido === 'ALL') return obj;
+  return (obj.by_sido && obj.by_sido[sido]) || obj;
+}
 
 function monthlyFor(s){
   const v = V();
@@ -686,9 +692,9 @@ function renderFilters(){
     b.onclick = () => { sido = b.dataset.sido; renderAll(); });
 
   if (!D.broker){ $('#dealfilters').innerHTML = ''; return; }
-  const dt = D.deal_type;
+  const dt = byS(D.deal_type);
   const dealOpts = [
-    ['all', `전체 거래 (${nf(D.kpi.total_deals)}건)`],
+    ['all', `전체 거래 (${nf(overallFor(sido).count)}건)`],
     ['broker', `중개거래만 (직거래 ${dt.direct_share_pct}% 제외)`],
   ];
   $('#dealfilters').innerHTML = dealOpts.map(([v,label]) =>
@@ -894,8 +900,8 @@ function renderWeekChart(){
    타입끼리만 견준 지수를 나란히 그려 그 차이를 눈으로 보게 한다. 두 선이 갈라지는
    구간이 곧 구성 효과의 크기다. */
 function renderMatchedIndex(){
-  const mi = D.matched_index;
-  if (!mi || mi.rows.length < 3) return;
+  const mi = byS(D.matched_index);
+  if (!mi || mi.rows.length < 3){ $('#mi-card').style.display = 'none'; return; }
   $('#mi-card').style.display = '';
   const rows = mi.rows;
   const W = 860, H = 300, ml = 46, mr = 58, mt = 16, mb = 40;
@@ -956,8 +962,8 @@ function renderMatchedIndex(){
 
 /* ---------- 해제(취소) 거래 ---------- */
 function renderCancels(){
-  const c = D.cancels;
-  if (!c || !c.median_days) return;
+  const c = byS(D.cancels);
+  if (!c || !c.median_days){ $('#cancel-card').style.display = 'none'; return; }
   $('#cancel-card').style.display = '';
   $('#cancel-note').innerHTML =
     `이번 집계에서 해제된 <b style="color:var(--text)">${nf(c.canceled)}건</b>을 따로 봤다. `
@@ -993,8 +999,8 @@ function renderCancels(){
 
 /* ---------- 거래 확정도 (등기완료율) ---------- */
 function renderSettlement(){
-  const s = D.settlement;
-  if (!s || !s.months.some(m => m.rate_pct != null)) return;
+  const s = byS(D.settlement);
+  if (!s || !s.months.some(m => m.rate_pct != null)){ $('#settle-card').style.display = 'none'; return; }
   $('#settle-card').style.display = '';
   $('#settle-note').innerHTML =
     `계약에서 소유권 이전 등기까지 <b style="color:var(--text)">중위 ${s.overall_median_days}일</b> `
@@ -1027,8 +1033,8 @@ function renderSettlement(){
 
 /* ---------- 매도자 · 매수자 구성 ---------- */
 function renderParty(){
-  const p = D.party;
-  if (!p || !p.seller) return;
+  const p = byS(D.party);
+  if (!p || !p.seller){ $('#party-card').style.display = 'none'; return; }
   $('#party-card').style.display = '';
   const sc = p.seller['법인'], bc = p.buyer['법인'];
   $('#party-note').innerHTML =
@@ -1088,20 +1094,33 @@ function renderParty(){
          <span><i style="background:var(--up)"></i>법인 매도 비중</span>
          <span><i style="background:var(--down)"></i>법인 매수 비중</span></div>` + svg;
   }
-  const top = p.regions.slice(0, 5).map(r =>
-    `${esc(shortName(r.region))} ${r.net_corp_sell_pct}%p`).join(' · ');
+  renderSortChips($('#party-region-sort'),
+    [['net_corp_sell_pct','법인 순매도'], ['seller_corp_pct','법인 매도'],
+     ['buyer_corp_pct','법인 매수'], ['count','건수']], partySort, renderParty);
+  const regions = sortRows(p.regions, partySort.key, partySort.dir).slice(0, 15);
+  const maxPR = Math.max(...regions.map(x => Math.abs(x[partySort.key] || 0)), 1);
+  $('#party-regions').innerHTML = regions.map(x => `<div class="dist-row">
+      <div style="font-size:12.5px">${esc(shortName(x.region))}</div>
+      <div class="track"><div class="fill" style="width:${(Math.abs(x[partySort.key] || 0)/maxPR*100).toFixed(1)}%"></div></div>
+      <div class="dist-val">순매도 <b style="color:var(--text)">${x.net_corp_sell_pct > 0 ? '+' : ''}${x.net_corp_sell_pct}%p</b>
+        · 매도 ${x.seller_corp_pct}% · 매수 ${x.buyer_corp_pct}% · ${nf(x.count)}건</div>
+    </div>`).join('') || '<p class="sub">표본 충분한 시군구가 없다.</p>';
   $('#party-foot').innerHTML =
-    `법인 순매도(매도−매수)가 큰 곳: ${top}. `
-    + `거래 ${p.min_rows}건 이상인 시군구만 낸다. `
+    `거래 ${p.min_rows}건 이상인 시군구만 낸다. `
     + `<span class="muted">법인 매도는 시행사·임대사업자 물량 정리부터 단순 자산 재배치까지 `
     + `원인이 여럿이라, 비중 자체를 호재나 악재로 읽을 수 없다.</span>`;
 }
 
 /* ---------- 확인이 필요한 거래 ---------- */
 let anomFlag = 'ALL';
+const ANOM_COLS = [
+  {k:'deal_date', t:'계약일'}, {k:'region', t:'지역'}, {k:'apt', t:'단지'},
+  {k:'area_type', t:'전용'}, {k:'amount_manwon', t:'거래가'}, {k:'peer_median', t:'단지 시세'},
+  {k:'gap_pct', t:'괴리'}, {t:'신호'},
+];
 function renderAnomalies(){
-  const a = D.anomalies;
-  if (!a || !a.rows.length) return;
+  const a = byS(D.anomalies);
+  if (!a || !a.rows.length){ $('#anom-card').style.display = 'none'; return; }
   $('#anom-card').style.display = '';
   // 탭 숫자는 목록에 실제로 실린 건수다. 전체 집계 수는 아래 설명에 따로 적는다.
   const sc = a.shown_flag_counts || a.flag_counts;
@@ -1112,7 +1131,8 @@ function renderAnomalies(){
   $('#anom-tabs').querySelectorAll('.chip').forEach(b =>
     b.onclick = () => { anomFlag = b.dataset.f; renderAnomalies(); });
 
-  const rows = anomFlag === 'ALL' ? a.rows : a.rows.filter(r => r.flags.includes(anomFlag));
+  const filtered = anomFlag === 'ALL' ? a.rows : a.rows.filter(r => r.flags.includes(anomFlag));
+  const rows = sortRows(filtered, anomSort.key, anomSort.dir);
   const allTotals = Object.entries(a.flag_counts).sort((x,y) => y[1]-x[1])
     .map(([f,n]) => `${f} ${nf(n)}`).join(' · ');
   $('#anom-note').innerHTML =
@@ -1122,6 +1142,7 @@ function renderAnomalies(){
     + `시세 괴리는 같은 단지 × 같은 전용타입의 중위가 대비 ${a.discount_pct}% 이상 싼 경우이고, `
     + `${a.peer_window[0]}~${a.peer_window[a.peer_window.length-1]} 안에서만 판정한다. `
     + `등기 지연은 계약 후 ${a.stale_days}일이 지나도록 등기가 없는 경우다.`;
+  renderSortHead($('#anom-thr'), ANOM_COLS, anomSort, renderAnomalies);
   $('#anom-body').innerHTML = rows.map(r => `<tr>
       <td>${esc(r.deal_date.slice(2))}</td>
       <td>${esc(shortName(r.region))}${r.umd ? ' ' + esc(r.umd) : ''}</td>
@@ -1173,6 +1194,47 @@ function sorted(rows){
   });
 }
 
+// 시군구 랭킹 말고도 신고가·재건축·확인필요 표에서 같은 방식(열 클릭 -> 정렬)을 또 쓴다.
+// 표마다 컬럼 정의와 정렬 상태는 따로 갖고, 실제 비교 규칙만 여기서 공유한다.
+function sortRows(rows, key, dir){
+  if (!key) return rows;
+  return [...rows].sort((a,b) => {
+    const av = a[key], bv = b[key];
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    if (typeof av === 'string') return av.localeCompare(bv, 'ko') * dir;
+    return (av - bv) * dir;
+  });
+}
+// 헤더 그리기 + 클릭 바인딩도 표마다 반복되는 부분만 공유한다.
+function renderSortHead(thr, cols, state, rerender){
+  thr.innerHTML = cols.map(c => !c.k
+    ? `<th style="cursor:default">${c.t}</th>`
+    : `<th data-k="${c.k}"${c.k===state.key?` aria-sort="${state.dir<0?'descending':'ascending'}"`:''}>`
+      + `${c.t}${c.k===state.key?(state.dir<0?' ▾':' ▴'):''}</th>`
+  ).join('');
+  thr.querySelectorAll('th[data-k]').forEach(th => th.onclick = () => {
+    const k = th.dataset.k;
+    if (k === state.key) state.dir *= -1;
+    else { state.key = k; state.dir = -1; }
+    rerender();
+  });
+}
+
+// 지역 분포 목록(전세가율·갱신 인상률·전환율·법인 매도)도 같은 방식으로 정렬 칩을 쓴다.
+function renderSortChips(container, fields, state, rerender){
+  container.innerHTML = fields.map(([k,label]) => `<button class="chip" data-k="${k}"
+      aria-pressed="${k===state.key}">${label}${k===state.key?(state.dir<0?' ▾':' ▴'):''}</button>`
+    ).join('');
+  container.querySelectorAll('.chip').forEach(b => b.onclick = () => {
+    const k = b.dataset.k;
+    if (k === state.key) state.dir *= -1;
+    else { state.key = k; state.dir = -1; }
+    rerender();
+  });
+}
+
 function renderTable(){
   $('#thr').innerHTML = COLS.map(c =>
     `<th data-k="${c.k}"${c.k===sortKey?` aria-sort="${sortDir<0?'descending':'ascending'}"`:''}>`
@@ -1217,7 +1279,9 @@ function downloadCsv(){
    막대는 거래 비중으로 그린다. 구간별 중위 평당가는 서로 비슷해서 0 기준 막대로 그리면
    네 개가 거의 같은 길이가 되어 아무것도 읽히지 않는다. 평당가는 숫자로 보여준다. */
 function renderDist(){
-  const rows = D.area_distribution;
+  const ad = sido === 'ALL' ? D.area_distribution
+    : {buckets: (D.area_distribution.by_sido && D.area_distribution.by_sido[sido]) || D.area_distribution.buckets};
+  const rows = ad.buckets;
   const total = rows.reduce((s,r) => s + r.count, 0) || 1;
   const maxShare = Math.max(...rows.map(r => r.count / total), 0.01);
   $('#dist').innerHTML = rows.map(r => {
@@ -1232,8 +1296,13 @@ function renderDist(){
 }
 
 /* ---------- 신고가 · 신저가 ---------- */
+const RH_COLS = [
+  {k:'deal_date', t:'계약일'}, {k:'region', t:'지역'}, {k:'apt', t:'단지'},
+  {k:'area_type', t:'전용'}, {k:'floor', t:'층'}, {k:'amount_manwon', t:'거래가'},
+  {k:'prev', t:'직전 기록'}, {k:'gap_pct', t:'갱신폭'},
+];
 function renderRecordHighs(){
-  const rh = D.record_highs;
+  const rh = byS(D.record_highs);
   if (!rh){ return; }
   const tabs = [['highs', `신고가 ${nf(rh.high_count)}건`], ['lows', `신저가 ${nf(rh.low_count)}건`]];
   $('#rhtabs').innerHTML = tabs.map(([v,label]) =>
@@ -1241,10 +1310,11 @@ function renderRecordHighs(){
   $('#rhtabs').querySelectorAll('.chip').forEach(b =>
     b.onclick = () => { rhTab = b.dataset.rh; renderRecordHighs(); });
 
-  const rows = rh[rhTab] || [];
+  const rows = sortRows(rh[rhTab] || [], rhSort.key, rhSort.dir);
   $('#rhnote').textContent =
     `${rh.window[0]} ~ ${rh.window[rh.window.length-1]} 계약분 · 단지×전용면적 타입별로 `
     + `직전 거래 4건 이상인 경우만 · 갱신폭 순 상위 ${rows.length}건`;
+  renderSortHead($('#rh-thr'), RH_COLS, rhSort, renderRecordHighs);
   const hist = D.complex_history || {};
   $('#rhbody').innerHTML = rows.map((r, i) => `<tr class="rh-row" data-i="${i}">
       <td>${esc(r.deal_date.slice(2))}</td>
@@ -1855,9 +1925,14 @@ function watchedLawds(){
 }
 
 /* ---------- 재건축 기대 분해 ---------- */
+const REBUILD_COLS = [
+  {t:''}, {k:'region', t:'지역'}, {k:'apt', t:'단지'}, {k:'area_type', t:'전용'},
+  {k:'build_year', t:'준공'}, {k:'median_ppp', t:'평당가'}, {k:'base_ppp', t:'동네 기준'},
+  {k:'premium_pct', t:'웃돈'}, {k:'count', t:'거래'},
+];
 function renderRebuild(){
-  const rb = D.rebuild;
-  if (!rb || !rb.rows.length) return;
+  const rb = byS(D.rebuild);
+  if (!rb || !rb.rows.length){ $('#rebuild-card').style.display = 'none'; return; }
   $('#rebuild-card').style.display = '';
   const curve = rb.curve.filter(c => c.median_ppp != null);
   const oldest = curve[curve.length-1], dip = curve.reduce((a,c) =>
@@ -1881,8 +1956,9 @@ function renderRebuild(){
     </div>`;
   }).join('');
 
-  const names = {};
-  $('#rebuild-body').innerHTML = rb.rows.map(r => {
+  renderSortHead($('#rebuild-thr'), REBUILD_COLS, rebuildSort, renderRebuild);
+  const rows = sortRows(rb.rows, rebuildSort.key, rebuildSort.dir);
+  $('#rebuild-body').innerHTML = rows.map(r => {
     const k = `${r.lawd_cd}|${r.apt}|${r.area_type}`;
     return `<tr>
       <td style="text-align:left">${starHtml(k)}</td>
@@ -1912,8 +1988,8 @@ function renderRebuild(){
 
 /* ---------- 층별 프리미엄 ---------- */
 function renderFloorPremium(){
-  const fp = D.floor_premium;
-  if (!fp || !fp.buckets.some(b => b.premium_pct != null)) return;
+  const fp = byS(D.floor_premium);
+  if (!fp || !fp.buckets.some(b => b.premium_pct != null)){ $('#floor-card').style.display = 'none'; return; }
   $('#floor-card').style.display = '';
   $('#floor-note').innerHTML =
     `같은 단지 × 같은 전용타입 안에서, 그 조합의 중위 평당가 대비 편차다 `
@@ -1941,18 +2017,20 @@ function renderFloorPremium(){
 
 /* ---------- 전세가율 ---------- */
 function renderJeonse(){
-  const j = D.jeonse;
-  if (!j || !j.regions || !j.regions.length) return;
+  const j = byS(D.jeonse);
+  if (!j || !j.regions || !j.regions.length){ $('#jeonse-card').style.display = 'none'; return; }
   $('#jeonse-card').style.display = '';
   $('#jeonse-note').innerHTML =
     `수도권 중위 <b style="color:var(--text)">${j.overall_pct}%</b> · `
     + `같은 단지 × 같은 전용타입끼리 짝지어 계산 (${nf(j.matched_pairs)}쌍 매칭) · `
     + `양쪽 모두 ${j.min_pairs}건 이상, 시군구당 ${j.min_region_samples}개 단지 이상만 집계`;
-  const rows = [...j.regions].sort((a,b) => b.jeonse_ratio_pct - a.jeonse_ratio_pct);
-  const max = Math.max(...rows.map(r => r.jeonse_ratio_pct), 1);
+  renderSortChips($('#jeonse-sort'),
+    [['jeonse_ratio_pct','전세가율'], ['matched_complexes','단지수']], jeonseSort, renderJeonse);
+  const rows = sortRows(j.regions, jeonseSort.key, jeonseSort.dir);
+  const max = Math.max(...rows.map(r => r[jeonseSort.key]), 1);
   $('#jeonse').innerHTML = rows.map(r => `<div class="dist-row">
       <div style="font-size:12.5px">${esc(shortName(r.region))}</div>
-      <div class="track"><div class="fill" style="width:${(r.jeonse_ratio_pct/max*100).toFixed(1)}%"></div></div>
+      <div class="track"><div class="fill" style="width:${(r[jeonseSort.key]/max*100).toFixed(1)}%"></div></div>
       <div class="dist-val"><b style="color:var(--text)">${r.jeonse_ratio_pct}%</b>
         · 단지 ${nf(r.matched_complexes)}개</div>
     </div>`).join('');
@@ -1962,8 +2040,8 @@ function renderJeonse(){
    전월세 원본의 contractType·preDeposit·useRRRight 를 여기서 처음 쓴다. 인상률은
    순수 전세끼리 갱신된 건만이라 월세가 섞인 갱신은 애초에 빠져 있다(집계 단계에서). */
 function renderRenewal(){
-  const r = D.renewal_hike;
-  if (!r || r.overall.median_pct == null) return;
+  const r = byS(D.renewal_hike);
+  if (!r || r.overall.median_pct == null){ $('#renewal-card').style.display = 'none'; return; }
   $('#renewal-card').style.display = '';
   $('#renewal-note').innerHTML =
     `순수 전세끼리 갱신된 <b style="color:var(--text)">${nf(r.overall.count)}건</b>에서 `
@@ -1996,11 +2074,14 @@ function renderRenewal(){
         · 상한 초과 ${m.over_cap_pct}% (${nf(m.count)}건)</div>
     </div>`).join('') || '<p class="sub">표본이 충분한 달이 없다.</p>';
 
-  const regions = r.regions.slice(0, 15);
-  const maxR = Math.max(...regions.map(x => x.over_cap_pct), 1);
+  renderSortChips($('#renewal-region-sort'),
+    [['over_cap_pct','상한 초과'], ['median_pct','중위 인상률'], ['count','건수']],
+    renewalSort, renderRenewal);
+  const regions = sortRows(r.regions, renewalSort.key, renewalSort.dir).slice(0, 15);
+  const maxR = Math.max(...regions.map(x => x[renewalSort.key]), 1);
   $('#renewal-regions').innerHTML = regions.map(x => `<div class="dist-row">
       <div style="font-size:12.5px">${esc(shortName(x.region))}</div>
-      <div class="track"><div class="fill" style="width:${(x.over_cap_pct/maxR*100).toFixed(1)}%;background:var(--up)"></div></div>
+      <div class="track"><div class="fill" style="width:${(x[renewalSort.key]/maxR*100).toFixed(1)}%;background:var(--up)"></div></div>
       <div class="dist-val"><b style="color:var(--text)">${x.over_cap_pct}%</b> 초과
         · 중위 ${x.median_pct}% · ${nf(x.count)}건</div>
     </div>`).join('') || '<p class="sub">표본 충분한 시군구가 없다.</p>';
@@ -2018,8 +2099,8 @@ function renderRenewal(){
    전세보증금을 월세로 바꿀 때 적용되는 비율. 한국부동산원이 매달 발표하는 값과
    같은 방식(단지 x 타입 안에서 전세 중위 보증금 대비 환산)으로 낸다. */
 function renderConversion(){
-  const c = D.rent_conversion;
-  if (!c || c.overall.median_pct == null) return;
+  const c = byS(D.rent_conversion);
+  if (!c || c.overall.median_pct == null){ $('#conversion-card').style.display = 'none'; return; }
   $('#conversion-card').style.display = '';
   $('#conversion-note').innerHTML =
     `월세 계약 ${nf(c.wolse_total)}건 중 짝지을 전세 표본이 있는 `
@@ -2037,11 +2118,13 @@ function renderConversion(){
       <div class="dist-val"><b style="color:var(--text)">${m.median_pct}%</b> · ${nf(m.count)}건</div>
     </div>`).join('') || '<p class="sub">표본이 충분한 달이 없다.</p>';
 
-  const regions = c.regions.slice(0, 15);
-  const maxR = Math.max(...regions.map(x => x.median_pct), 1);
+  renderSortChips($('#conversion-region-sort'),
+    [['median_pct','전환율'], ['count','건수']], conversionSort, renderConversion);
+  const regions = sortRows(c.regions, conversionSort.key, conversionSort.dir).slice(0, 15);
+  const maxR = Math.max(...regions.map(x => x[conversionSort.key]), 1);
   $('#conversion-regions').innerHTML = regions.map(x => `<div class="dist-row">
       <div style="font-size:12.5px">${esc(shortName(x.region))}</div>
-      <div class="track"><div class="fill" style="width:${(x.median_pct/maxR*100).toFixed(1)}%"></div></div>
+      <div class="track"><div class="fill" style="width:${(x[conversionSort.key]/maxR*100).toFixed(1)}%"></div></div>
       <div class="dist-val"><b style="color:var(--text)">${x.median_pct}%</b> · ${nf(x.count)}건</div>
     </div>`).join('') || '<p class="sub">표본 충분한 시군구가 없다.</p>';
 
@@ -2054,7 +2137,7 @@ function renderConversion(){
 
 /* ---------- 거래 형태 ---------- */
 function renderDealType(){
-  const dt = D.deal_type;
+  const dt = byS(D.deal_type);
   if (!dt){ return; }
   const total = dt.broker.count + dt.direct.count || 1;
   const rows = [
@@ -2776,6 +2859,10 @@ function initTheme(){
 
 function renderAll(){
   renderFilters(); renderKpi(); renderChart(); renderTable();
+  renderDist(); renderRecordHighs(); renderFloorPremium(); renderJeonse();
+  renderRenewal(); renderConversion(); renderDealType();
+  renderMatchedIndex(); renderCancels(); renderSettlement(); renderParty();
+  renderRebuild(); renderAnomalies();
   if (tab === 'map') { renderMap(); renderMapDetail(); }
 }
 

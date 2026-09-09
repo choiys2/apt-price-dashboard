@@ -1285,6 +1285,22 @@ def _views(records, months):
     }
 
 
+def _sido_split(records):
+    """레코드를 시도 3개로 쪼갠다. sido_rollup 과 같은 규칙(region 앞 토큰)이다.
+
+    시군구 단위 표·지도는 이미 필터링돼 있지만, 카드 상단의 집계값(중위·비중·구성비 등)은
+    여러 시군구를 한꺼번에 풀링해 내는 값이라 "서울만" 보려면 서울 레코드만 따로 넣어
+    같은 함수를 다시 돌려야 한다. 부분합으로는 못 만든다 - 중위값은 그런 식으로
+    쪼개지지 않는다.
+    """
+    out = {s: [] for s in SIDO_ORDER}
+    for r in records:
+        sido = r.get("region", "").split(" ")[0]
+        if sido in out:
+            out[sido].append(r)
+    return out
+
+
 def analyze(payload, include_canceled=False, expected_regions=None, rent_payload=None):
     raw = payload["records"]
     records = raw if include_canceled else [r for r in raw if not r.get("canceled")]
@@ -1294,6 +1310,16 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
     months = sorted({r["deal_ym"] for r in records})
     broker = [r for r in records if _is_broker(r)]
     expected = expected_regions if expected_regions is not None else REGIONS
+
+    # 개요 탭의 시도 필터(서울/인천/경기)를 눌렀을 때 카드 상단 숫자도 그 지역만
+    # 보여주려면, 같은 집계 함수를 시도별로 한 번씩 더 돌려야 한다. 원본 records/raw/
+    # broker/rr 를 각각 쪼갠다.
+    sido_recs = _sido_split(records)
+    sido_raw = _sido_split(raw)
+    sido_broker = _sido_split(broker)
+
+    def by_sido(fn, slices, *args, **kwargs):
+        return {s: fn(rs, *args, **kwargs) for s, rs in slices.items() if rs}
 
     result = {
         "meta": {
@@ -1309,36 +1335,50 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
         # 직거래를 뺀 시세 기준. 대시보드에서 토글로 전환한다.
         "broker": _views(broker, months) if broker else None,
         "umd_top": umd_ranking(records),
-        "area_distribution": area_distribution(records),
-        "deal_type": deal_type_stats(records),
+        "area_distribution": {
+            "buckets": area_distribution(records),
+            "by_sido": {s: area_distribution(rs) for s, rs in sido_recs.items() if rs},
+        },
+        "deal_type": {**deal_type_stats(records), "by_sido": by_sido(deal_type_stats, sido_recs)},
         "record_highs": None,   # 아래에서 채운다
         "cancel_rate": cancel_rate_series(raw, months),
         # 등기일자·중개사 소재지·매도자 구분은 원본에 늘 있었는데 쓰지 않고 있었다.
         # 채움률은 각각 74.8% / 95.1% / 100% 다.
-        "settlement": settlement_series(records, months),
+        "settlement": {**settlement_series(records, months),
+                      "by_sido": by_sido(settlement_series, sido_recs, months)},
         "outside_agent": outside_agent_stats(records, months),
-        "party": party_stats(records, months),
-        "anomalies": anomaly_flags(records, months),
+        "party": {**party_stats(records, months), "by_sido": by_sido(party_stats, sido_recs, months)},
+        "anomalies": {**anomaly_flags(records, months),
+                     "by_sido": by_sido(anomaly_flags, sido_recs, months)},
         # 월별 중위 평당가는 그달에 무엇이 거래됐는지에 끌려간다. 같은 단지 x 같은
         # 타입끼리만 견준 지수를 나란히 실어 그 차이를 화면에서 드러낸다.
-        "matched_index": matched_index(records, months),
-        "cancels": cancel_analysis(raw, months),
+        "matched_index": {**matched_index(records, months),
+                          "by_sido": by_sido(matched_index, sido_recs, months)},
+        "cancels": {**cancel_analysis(raw, months), "by_sido": by_sido(cancel_analysis, sido_raw, months)},
         "umd_breakdown": umd_breakdown(records),
         # 재건축 기대는 직거래를 빼고 본다. 시세보다 28.5% 낮게 신고되는 건들이 섞이면
         # 노후 단지의 웃돈이 실제보다 작게 나온다.
-        "rebuild": rebuild_premium(broker or records, months),
+        "rebuild": {**rebuild_premium(broker or records, months),
+                   "by_sido": {s: rebuild_premium(sido_broker.get(s) or sido_recs.get(s, []), months)
+                              for s in SIDO_ORDER if sido_recs.get(s)}},
     }
     rh = record_highs(records, months)
+    rh_by_sido = by_sido(record_highs, sido_recs, months)
+    rh["by_sido"] = rh_by_sido
     result["record_highs"] = rh
     # 표에 실제로 뜨는 행의 조합만 이력을 싣는다. 전체 28,488개를 다 넣으면 JSON 이
-    # 감당이 안 되고, 화면에서 펼쳐 보는 것도 이 행들뿐이다.
-    keys = {(r["region"], r["apt"], r["area_type"]) for r in rh["highs"] + rh["lows"]}
+    # 감당이 안 되고, 화면에서 펼쳐 보는 것도 이 행들뿐이다. 시도 필터로 펼치는 행도
+    # 같은 표에서 나오므로, 그 키도 같이 모아야 한다 - 안 그러면 서울만 볼 때는
+    # 없던 단지가 전체 보기로 돌아와야 이력이 나오는 것처럼 보인다.
+    all_rh = [rh] + list(rh_by_sido.values())
+    keys = {(r["region"], r["apt"], r["area_type"])
+            for one in all_rh for r in one["highs"] + one["lows"]}
     code_by_region = {}
     for r in records:
         code_by_region.setdefault(r["region"], r["lawd_cd"])
     keys = {(code_by_region.get(reg), apt, at) for reg, apt, at in keys if code_by_region.get(reg)}
     result["complex_history"] = complex_histories(records, keys)
-    result["floor_premium"] = floor_premium(records)
+    result["floor_premium"] = {**floor_premium(records), "by_sido": by_sido(floor_premium, sido_recs)}
     # 예산 역질의용 시세 인덱스. 직거래는 시세보다 28.5% 낮게 신고되는 경우가 많아
     # "이 값이면 살 수 있다"는 표에 섞으면 안 된다.
     result["price_index"] = price_index(broker or records, months)
@@ -1352,13 +1392,23 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
 
     if rent_payload:
         rr = rent_payload.get("records", [])
+        sido_rent = _sido_split(rr)
         result["jeonse"] = jeonse_ratio(records, rr)
+        result["jeonse"]["by_sido"] = {
+            s: jeonse_ratio(sido_recs[s], sido_rent[s])
+            for s in SIDO_ORDER if sido_recs.get(s) and sido_rent.get(s)
+        }
         result["meta"]["rent_record_count"] = len(rr)
         result["meta"]["jeonse_record_count"] = sum(1 for r in rr if r.get("is_jeonse"))
         # contractType/preDeposit/useRRRight 는 원본에 늘 있었는데 여태 전세가율 계산에만
         # 쓰던 is_jeonse/deposit_manwon 말고는 손대지 않고 있었다.
-        result["renewal_hike"] = renewal_hike_stats(rr, months)
+        result["renewal_hike"] = {**renewal_hike_stats(rr, months),
+                                  "by_sido": by_sido(renewal_hike_stats, sido_rent, months)}
         result["rent_conversion"] = rent_conversion_rate(records, rr, months)
+        result["rent_conversion"]["by_sido"] = {
+            s: rent_conversion_rate(sido_recs[s], sido_rent[s], months)
+            for s in SIDO_ORDER if sido_recs.get(s) and sido_rent.get(s)
+        }
     return result
 
 
