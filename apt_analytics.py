@@ -208,6 +208,42 @@ def area_distribution(records):
     return rows
 
 
+def area_premium_trend(records, months, min_month_rows=20):
+    """면적 구간별 월별 중위 평당가와, 가장 작은 구간(~60㎡) 대비 프리미엄 추이.
+
+    area_distribution() 은 수집 기간 전체를 통째로 낸 스냅샷이라 대형·소형 평당가
+    격차가 시간이 지나며 벌어지는지 좁혀지는지가 보이지 않는다. 같은 4개 구간을
+    월별로 다시 갈라 기준 구간(가장 작은 면적대) 대비 프리미엄이 어떻게 움직이는지
+    본다.
+    """
+    base_label = AREA_BUCKETS[0][0]
+    by_month = defaultdict(lambda: defaultdict(list))
+    for r in records:
+        area = r.get("area_m2")
+        if not area:
+            continue
+        for label, lo, hi in AREA_BUCKETS:
+            if lo <= area < hi:
+                by_month[r["deal_ym"]][label].append(r)
+                break
+
+    monthly = []
+    for ym in months:
+        month_groups = by_month.get(ym, {})
+        base_group = month_groups.get(base_label, [])
+        base_med = summarize(base_group)["median_ppp"] if len(base_group) >= min_month_rows else None
+        buckets = {}
+        for label, lo, hi in AREA_BUCKETS:
+            group = month_groups.get(label, [])
+            med = summarize(group)["median_ppp"] if len(group) >= min_month_rows else None
+            premium = round((med - base_med) / base_med * 100, 1) if med is not None and base_med else None
+            buckets[label] = {"median_ppp": med, "count": len(group), "premium_pct": premium}
+        monthly.append({"ym": ym, "buckets": buckets})
+
+    return {"bucket_labels": [b[0] for b in AREA_BUCKETS], "base_bucket": base_label,
+            "monthly": monthly, "min_month_rows": min_month_rows}
+
+
 def record_highs(records, months, recent_months=3, min_history=3, top_n=60):
     """단지 x 면적타입 단위로 신고가·신저가 갱신 거래를 찾는다.
 
@@ -1132,6 +1168,57 @@ def jeonse_ratio(sale_records, rent_records, min_pairs=2, min_region_samples=5):
     }
 
 
+def jeonse_ratio_by_age(sale_records, rent_records, this_year=None, min_pairs=2, min_bucket_samples=15):
+    """건축연령대별 전세가율. "신축일수록 전세가율이 낮다"는 통설을 실제로 확인한다.
+
+    단지 x 전용타입 짝짓기는 jeonse_ratio() 와 같은 규칙이다 - 지역이 아니라 준공
+    연도(AGE_BUCKETS, rebuild_premium() 의 연식 구간과 같다)로 묶어서 본다는 점만
+    다르다. 신축은 전세 수요 대비 공급이 적어 전세가율이 낮고(매매가가 비싸서),
+    구축일수록 전세가율이 높아지는 경향이 있다고 알려져 있다.
+    """
+    year = this_year or date.today().year
+    sale = defaultdict(list)
+    build_year_of = {}
+    for r in sale_records:
+        atype = _area_type(r)
+        if atype and r.get("apt") and r.get("amount_manwon"):
+            key = (r["lawd_cd"], r["apt"], atype)
+            sale[key].append(r["amount_manwon"])
+            if r.get("build_year") and key not in build_year_of:
+                build_year_of[key] = r["build_year"]
+
+    rent = defaultdict(list)
+    for r in rent_records:
+        if r.get("is_jeonse") and r.get("area_type") and r.get("apt") and r.get("deposit_manwon"):
+            rent[(r["lawd_cd"], r["apt"], r["area_type"])].append(r["deposit_manwon"])
+
+    by_bucket = defaultdict(list)
+    matched = 0
+    for key, sale_amounts in sale.items():
+        deposits = rent.get(key)
+        by = build_year_of.get(key)
+        if not deposits or not by or len(sale_amounts) < min_pairs or len(deposits) < min_pairs:
+            continue
+        age = year - by
+        ratio = median(deposits) / median(sale_amounts) * 100
+        for lo, hi in AGE_BUCKETS:
+            if lo <= age < hi:
+                by_bucket[(lo, hi)].append(ratio)
+                break
+        matched += 1
+
+    rows = []
+    for lo, hi in AGE_BUCKETS:
+        ratios = by_bucket.get((lo, hi), [])
+        rows.append({
+            "bucket": f"{lo}~{hi}년" if hi < 999 else f"{lo}년~", "lo": lo,
+            "count": len(ratios),
+            "jeonse_ratio_pct": round(median(ratios), 1) if len(ratios) >= min_bucket_samples else None,
+        })
+    return {"buckets": rows, "matched_pairs": matched, "min_pairs": min_pairs,
+            "min_bucket_samples": min_bucket_samples}
+
+
 def renewal_hike_stats(rent_records, months, cap_pct=5.0, min_rows=30, min_region_rows=100):
     """갱신 인상률 - 임대차 2법 5% 상한이 실제로 지켜지는지.
 
@@ -1271,6 +1358,79 @@ def rent_conversion_rate(sale_records, rent_records, months, min_jeonse=3, min_m
     }
 
 
+def gap_investment_ratio(sale_records, rent_records, months, window_days=45,
+                         min_month_rows=50, min_region_rows=150):
+    """갭투자(전세를 낀 매매) 비율 추정.
+
+    매수 시점에 자금을 대려고 새 세입자를 들이는 갭투자는, 매매 계약일 전후로 같은
+    단지 x 같은 전용타입 x 같은 층에서 새 전세 계약이 신고된다는 흔적을 남긴다.
+    전월세 API 에는 동(건물) 정보가 없어 층까지만 맞춰볼 수 있다 - 대단지는 같은
+    층에도 세대가 여럿이라, 완전히 무관한 다른 세대의 우연한 전세 계약과 구분이
+    안 된다. 그래서 이 값은 "갭투자로 볼 수 있는 거래의 상한"에 가깝다.
+
+    잡히지 않는 것: 매수 전부터 살던 세입자를 그대로 승계하는(기존 계약을 새로
+    신고하지 않는) 갭투자는 전월세 API 에 흔적이 없어 이 지표로는 못 잡는다.
+    """
+    jeonse_dates = defaultdict(list)
+    for r in rent_records:
+        if (r.get("is_jeonse") and r.get("apt") and r.get("area_type")
+                and r.get("floor") is not None):
+            key = (r["lawd_cd"], r["apt"], r["area_type"], r["floor"])
+            jeonse_dates[key].append(r["deal_date"])
+
+    def nearby_jeonse(sale):
+        atype = _area_type(sale)
+        if not atype or sale.get("floor") is None or not sale.get("apt"):
+            return None            # 층·면적타입이 없어 애초에 판정 불가 - 표본에서 뺀다
+        key = (sale["lawd_cd"], sale["apt"], atype, sale["floor"])
+        dates = jeonse_dates.get(key)
+        if not dates:
+            return False
+        sd = date.fromisoformat(sale["deal_date"])
+        return any(abs((date.fromisoformat(d) - sd).days) <= window_days for d in dates)
+
+    window = set(months)
+    by_month = defaultdict(lambda: {"eligible": 0, "matched": 0})
+    by_region = defaultdict(lambda: {"eligible": 0, "matched": 0, "region": None})
+    eligible = matched = 0
+    for r in sale_records:
+        if r["deal_ym"] not in window:
+            continue
+        hit = nearby_jeonse(r)
+        if hit is None:
+            continue
+        eligible += 1
+        by_month[r["deal_ym"]]["eligible"] += 1
+        by_region[r["lawd_cd"]]["eligible"] += 1
+        by_region[r["lawd_cd"]]["region"] = r["region"]
+        if hit:
+            matched += 1
+            by_month[r["deal_ym"]]["matched"] += 1
+            by_region[r["lawd_cd"]]["matched"] += 1
+
+    monthly = []
+    for ym in months:
+        m = by_month.get(ym, {"eligible": 0, "matched": 0})
+        pct = round(m["matched"] / m["eligible"] * 100, 1) if m["eligible"] >= min_month_rows else None
+        monthly.append({"ym": ym, "count": m["eligible"], "matched": m["matched"], "pct": pct})
+
+    regions = []
+    for code, g in by_region.items():
+        if g["eligible"] < min_region_rows:
+            continue
+        regions.append({"lawd_cd": code, "region": g["region"], "count": g["eligible"],
+                        "matched": g["matched"],
+                        "pct": round(g["matched"] / g["eligible"] * 100, 1)})
+    regions.sort(key=lambda r: r["pct"], reverse=True)
+
+    return {
+        "eligible": eligible, "matched": matched,
+        "overall_pct": round(matched / eligible * 100, 1) if eligible else None,
+        "window_days": window_days, "monthly": monthly, "regions": regions,
+        "min_month_rows": min_month_rows, "min_region_rows": min_region_rows,
+    }
+
+
 def _views(records, months):
     """한 벌의 거래 목록으로 KPI/추이/랭킹을 만든다. 전체본과 중개거래본에 같이 쓴다."""
     return {
@@ -1361,6 +1521,8 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
         "rebuild": {**rebuild_premium(broker or records, months),
                    "by_sido": {s: rebuild_premium(sido_broker.get(s) or sido_recs.get(s, []), months)
                               for s in SIDO_ORDER if sido_recs.get(s)}},
+        "area_premium": {**area_premium_trend(records, months),
+                         "by_sido": by_sido(area_premium_trend, sido_recs, months)},
     }
     rh = record_highs(records, months)
     rh_by_sido = by_sido(record_highs, sido_recs, months)
@@ -1407,6 +1569,19 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
         result["rent_conversion"] = rent_conversion_rate(records, rr, months)
         result["rent_conversion"]["by_sido"] = {
             s: rent_conversion_rate(sido_recs[s], sido_rent[s], months)
+            for s in SIDO_ORDER if sido_recs.get(s) and sido_rent.get(s)
+        }
+        # 신축일수록 전세가율이 낮다는 통설을 준공연도 구간별로 확인한다.
+        result["jeonse_by_age"] = jeonse_ratio_by_age(records, rr)
+        result["jeonse_by_age"]["by_sido"] = {
+            s: jeonse_ratio_by_age(sido_recs[s], sido_rent[s])
+            for s in SIDO_ORDER if sido_recs.get(s) and sido_rent.get(s)
+        }
+        # 갭투자(전세를 낀 매매) 비율 - 매매 계약 전후로 같은 단지x타입x층에서
+        # 새 전세 계약이 신고되는지를 본다.
+        result["gap_investment"] = gap_investment_ratio(records, rr, months)
+        result["gap_investment"]["by_sido"] = {
+            s: gap_investment_ratio(sido_recs[s], sido_rent[s], months)
             for s in SIDO_ORDER if sido_recs.get(s) and sido_rent.get(s)
         }
     return result

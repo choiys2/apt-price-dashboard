@@ -335,6 +335,13 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <div class="dist" id="dist"></div>
 </section>
 
+<section class="card" id="area-premium-card" style="display:none">
+  <h2>면적대별 프리미엄 추이</h2>
+  <p class="sub" id="area-premium-note" style="margin:0 0 12px"></p>
+  <div id="area-premium-chart"></div>
+  <p class="sub" id="area-premium-warn" style="margin-top:12px"></p>
+</section>
+
 <section class="card" id="floor-card" style="display:none">
   <h2>층별 프리미엄</h2>
   <p class="sub" id="floor-note" style="margin:0 0 12px"></p>
@@ -346,6 +353,12 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <p class="sub" id="jeonse-note" style="margin:0 0 12px"></p>
   <div class="filters" style="margin:0 0 10px" id="jeonse-sort"></div>
   <div class="dist" id="jeonse"></div>
+</section>
+
+<section class="card" id="jeonse-age-card" style="display:none">
+  <h2>건축연령대별 전세가율</h2>
+  <p class="sub" id="jeonse-age-note" style="margin:0 0 12px"></p>
+  <div class="dist" id="jeonse-age"></div>
 </section>
 
 <section class="card" id="renewal-card" style="display:none">
@@ -374,6 +387,21 @@ footer ul{padding-left:18px;margin:8px 0 0}
   </div>
   <div class="dist" id="conversion-regions"></div>
   <p class="sub" id="conversion-warn" style="margin-top:12px"></p>
+</section>
+
+<section class="card" id="gap-card" style="display:none">
+  <h2>갭투자(전세 낀 매매) 비율 추정</h2>
+  <p class="sub" id="gap-note" style="margin:0 0 14px"></p>
+  <div class="table-head" style="margin-bottom:6px">
+    <h2 style="margin:0;font-size:13.5px;color:var(--muted)">월별</h2>
+  </div>
+  <div class="dist" id="gap-monthly" style="margin-bottom:16px"></div>
+  <div class="table-head" style="margin-bottom:6px">
+    <h2 style="margin:0;font-size:13.5px;color:var(--muted)">시군구</h2>
+    <div class="filters" style="margin:0" id="gap-region-sort"></div>
+  </div>
+  <div class="dist" id="gap-regions"></div>
+  <p class="sub" id="gap-warn" style="margin-top:12px"></p>
 </section>
 
 <section class="card">
@@ -1986,6 +2014,65 @@ function renderRebuild(){
     + `+30%를 넘는 것이 ${nf(rb.over30_count)}개다.`;
 }
 
+/* ---------- 면적대별 프리미엄 추이 ---------- */
+function renderAreaPremium(){
+  const ap = byS(D.area_premium);
+  if (!ap){ $('#area-premium-card').style.display = 'none'; return; }
+  const nonBase = ap.bucket_labels.filter(l => l !== ap.base_bucket);
+  const months = ap.monthly.filter(m => nonBase.some(l => m.buckets[l].premium_pct != null));
+  if (!months.length){ $('#area-premium-card').style.display = 'none'; return; }
+  $('#area-premium-card').style.display = '';
+
+  // 색은 상승·하락 의미(--up/--down)가 아니라 면적 구간을 구분하는 용도라 별개 팔레트를
+  // 쓴다 - 파랑->초록->빨강이 --accent/--down 끼리처럼 서로 비슷해 겹쳐 보이지 않는다.
+  const colors = ['#2160c2', '#3fae6a', '#df3d4d'];
+  const W = 860, H = 260, ml = 46, mr = 20, mt = 16, mb = 34;
+  const iw = W-ml-mr, ih = H-mt-mb;
+  const vals = months.flatMap(m => nonBase.map(l => m.buckets[l].premium_pct)).filter(v => v != null);
+  const lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+  const pad = Math.max((hi-lo)*0.12, 1);
+  const x = i => ml + (iw/Math.max(months.length-1,1))*i;
+  const y = v => mt + ih - ((v-(lo-pad))/((hi+pad)-(lo-pad) || 1))*ih;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="면적대별 기준 구간 대비 평당가 프리미엄 추이">`;
+  for (let t = 0; t <= 4; t++){
+    const v = (lo-pad) + ((hi+pad)-(lo-pad))*t/4;
+    svg += `<line class="gridline" x1="${ml}" y1="${y(v)}" x2="${ml+iw}" y2="${y(v)}"/>`
+        +  `<text class="axis-text" x="${ml-8}" y="${y(v)+4}" text-anchor="end">${v.toFixed(0)}%</text>`;
+  }
+  svg += `<line x1="${ml}" y1="${y(0)}" x2="${ml+iw}" y2="${y(0)}" stroke="var(--muted)"`
+      +  ` stroke-dasharray="4 4" opacity=".55"/>`;
+  nonBase.forEach((label, li) => {
+    const color = colors[li % colors.length];
+    const pts = months.map((m,i) => m.buckets[label].premium_pct == null
+      ? null : [x(i), y(m.buckets[label].premium_pct)]).filter(Boolean);
+    if (pts.length >= 2){
+      svg += `<path d="${pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ')}"`
+          +  ` fill="none" stroke="${color}" stroke-width="2.2" stroke-linejoin="round"/>`;
+    }
+    pts.forEach(p => { svg += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.8" fill="${color}"/>`; });
+  });
+  const step = Math.ceil(months.length/8);
+  months.forEach((m,i) => { if (i % step && i !== months.length-1) return;
+    svg += `<text class="axis-text" x="${x(i)}" y="${mt+ih+18}" text-anchor="middle">${m.ym.slice(2)}</text>`; });
+  svg += '</svg>';
+
+  const legend = nonBase.map((l,i) =>
+    `<span><i style="background:${colors[i%colors.length]}"></i>${esc(l)}</span>`).join('');
+  $('#area-premium-chart').innerHTML = `<div class="legend" style="margin-bottom:6px">${legend}</div>` + svg;
+
+  const last = months[months.length-1];
+  const parts = nonBase.map(l => `${esc(l)} ${last.buckets[l].premium_pct == null
+    ? '–' : pct(last.buckets[l].premium_pct)}`).join(' · ');
+  $('#area-premium-note').innerHTML =
+    `기준 구간(<b style="color:var(--text)">${esc(ap.base_bucket)}</b>) 평당가 대비, `
+    + `${last.ym} 기준 ${parts}.`;
+  $('#area-premium-warn').innerHTML =
+    `<span class="muted">월 ${ap.min_month_rows}건 미만인 구간은 표시하지 않는다. `
+    + `평형별 구성(신축·구축 비중 등)이 달마다 달라질 수 있어, 격차 변화를 곧바로 `
+    + `"대형이 더 올랐다/내렸다"로 단정하기는 조심스럽다.</span>`;
+}
+
 /* ---------- 층별 프리미엄 ---------- */
 function renderFloorPremium(){
   const fp = byS(D.floor_premium);
@@ -2034,6 +2121,30 @@ function renderJeonse(){
       <div class="dist-val"><b style="color:var(--text)">${r.jeonse_ratio_pct}%</b>
         · 단지 ${nf(r.matched_complexes)}개</div>
     </div>`).join('');
+}
+
+/* ---------- 건축연령대별 전세가율 ---------- */
+function renderJeonseByAge(){
+  const j = byS(D.jeonse_by_age);
+  if (!j || !j.buckets.some(b => b.jeonse_ratio_pct != null)){
+    $('#jeonse-age-card').style.display = 'none'; return;
+  }
+  $('#jeonse-age-card').style.display = '';
+  const vals = j.buckets.map(b => b.jeonse_ratio_pct).filter(v => v != null);
+  const max = Math.max(...vals, 1);
+  $('#jeonse-age').innerHTML = j.buckets.map(b => `<div class="dist-row">
+      <div>${esc(b.bucket)}</div>
+      <div class="track"><div class="fill" style="width:${b.jeonse_ratio_pct == null ? 0
+        : (b.jeonse_ratio_pct/max*100).toFixed(1)}%"></div></div>
+      <div class="dist-val">${b.jeonse_ratio_pct == null ? '<span class="muted">표본 부족</span>'
+        : `<b style="color:var(--text)">${b.jeonse_ratio_pct}%</b>`} · 단지 ${nf(b.count)}개</div>
+    </div>`).join('');
+  $('#jeonse-age-note').innerHTML =
+    `단지 × 전용타입 ${nf(j.matched_pairs)}쌍을 준공연도로 나눠 봤다 `
+    + `(구간당 단지 ${j.min_bucket_samples}개 이상만 표시). `
+    + `<span class="muted">신축은 전세 공급이 적어 전세가율이 낮고, 구축일수록 매매가 `
+    + `대비 전세가 비중이 높아지는 경향이 있다고 알려져 있다 - 실제 이 값이 그 통설과 `
+    + `맞는지 확인하는 용도다.</span>`;
 }
 
 /* ---------- 갱신 인상률 (임대차 2법 5% 상한) ----------
@@ -2133,6 +2244,46 @@ function renderConversion(){
     + `법정 상한(기준금리 + 2%p)을 넘는지는 이 표에서 판정하지 않는다 — 실거래가 API 에는 `
     + `계약 시점의 기준금리가 없어, 상한과 견주려면 그 시점 기준금리를 따로 대야 한다. `
     + `<span class="muted">30%를 넘는 값은 표본 오류로 보고 제외했다.</span>`;
+}
+
+/* ---------- 갭투자(전세 낀 매매) 비율 추정 ---------- */
+const gapSort = {key: 'pct', dir: -1};
+function renderGapInvestment(){
+  const g = byS(D.gap_investment);
+  if (!g || g.overall_pct == null){ $('#gap-card').style.display = 'none'; return; }
+  $('#gap-card').style.display = '';
+  $('#gap-note').innerHTML =
+    `판정 가능한 매매 <b style="color:var(--text)">${nf(g.eligible)}건</b> 중 `
+    + `매매 계약 전후 ${g.window_days}일 안에 같은 단지 × 같은 전용타입 × 같은 층에서 `
+    + `새 전세 계약이 신고된 것은 <b style="color:var(--text)">${g.overall_pct}%</b>`
+    + `(${nf(g.matched)}건)다.`;
+
+  const months = g.monthly.filter(m => m.pct != null);
+  const maxM = Math.max(...months.map(m => m.pct), 1);
+  $('#gap-monthly').innerHTML = months.map(m => `<div class="dist-row">
+      <div>${esc(m.ym)}</div>
+      <div class="track"><div class="fill" style="width:${(m.pct/maxM*100).toFixed(1)}%"></div></div>
+      <div class="dist-val"><b style="color:var(--text)">${m.pct}%</b> · ${nf(m.matched)}/${nf(m.count)}건</div>
+    </div>`).join('') || '<p class="sub">표본이 충분한 달이 없다.</p>';
+
+  renderSortChips($('#gap-region-sort'), [['pct','비율'], ['count','건수']], gapSort, renderGapInvestment);
+  const regions = sortRows(g.regions, gapSort.key, gapSort.dir).slice(0, 15);
+  const maxR = Math.max(...regions.map(x => x[gapSort.key]), 1);
+  $('#gap-regions').innerHTML = regions.map(x => `<div class="dist-row">
+      <div style="font-size:12.5px">${esc(shortName(x.region))}</div>
+      <div class="track"><div class="fill" style="width:${(x[gapSort.key]/maxR*100).toFixed(1)}%"></div></div>
+      <div class="dist-val"><b style="color:var(--text)">${x.pct}%</b> · ${nf(x.matched)}/${nf(x.count)}건</div>
+    </div>`).join('') || '<p class="sub">표본 충분한 시군구가 없다.</p>';
+
+  $('#gap-warn').innerHTML =
+    `<b>이 값은 "갭투자로 볼 수 있는 거래의 상한"이지, 갭투자 확정치가 아니다.</b> `
+    + `전월세 API 에는 동(건물) 정보가 없어 같은 층까지만 맞춰본다 — 대단지는 한 층에도 `
+    + `세대가 여럿이라, 완전히 무관한 다른 세대의 우연한 전세 계약과 구분이 안 된다. `
+    + `반대로 <b>매수 전부터 살던 세입자를 그대로 승계하는 갭투자는 새 계약 신고 자체가 `
+    + `없어 이 지표로는 못 잡는다</b> — 그래서 실제 갭투자 비율과는 양방향으로 어긋날 수 있다. `
+    + `<br><span class="muted">월별 추이의 <b>최근 한두 달은 낮게 나오는 것이 정상이다</b> — `
+    + `매매 이후 최대 ${g.window_days}일 뒤까지도 전세 계약을 볼 수 있어야 하는데, 최근 달은 `
+    + `아직 그만큼의 시간이 지나지 않아 매칭될 기회 자체가 적다. 감소세로 읽으면 안 된다.</span>`;
 }
 
 /* ---------- 거래 형태 ---------- */
@@ -2859,8 +3010,9 @@ function initTheme(){
 
 function renderAll(){
   renderFilters(); renderKpi(); renderChart(); renderTable();
-  renderDist(); renderRecordHighs(); renderFloorPremium(); renderJeonse();
-  renderRenewal(); renderConversion(); renderDealType();
+  renderDist(); renderRecordHighs(); renderAreaPremium(); renderFloorPremium();
+  renderJeonse(); renderJeonseByAge();
+  renderRenewal(); renderConversion(); renderGapInvestment(); renderDealType();
   renderMatchedIndex(); renderCancels(); renderSettlement(); renderParty();
   renderRebuild(); renderAnomalies();
   if (tab === 'map') { renderMap(); renderMapDetail(); }
@@ -2873,10 +3025,13 @@ renderRecordHighs();
 $('#b-budget').value = BST.budget; $('#b-area').value = BST.area;
 if (GEO){ $('#mb-budget').value = BST.budget; $('#mb-area').value = BST.area; }
 renderBudget();
+renderAreaPremium();
 renderFloorPremium();
 renderJeonse();
+renderJeonseByAge();
 renderRenewal();
 renderConversion();
+renderGapInvestment();
 renderDealType();
 renderMatchedIndex();
 renderCancels();

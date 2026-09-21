@@ -4,12 +4,13 @@ import unittest
 
 from apt_analytics import (
     PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym, _sido_split,
-    _same_month_last_year, analyze, area_distribution, build_kpi, cancel_rate_series,
-    deal_type_stats, missing_regions, monthly_series, record_highs, reference_month,
-    anomaly_flags, cancel_analysis, complex_histories, complex_shards, floor_premium,
-    jeonse_ratio, matched_index, outside_agent_stats, party_stats, region_monthly,
-    region_ranking, renewal_hike_stats, rent_conversion_rate, settlement_series,
-    summarize, umd_breakdown, umd_ranking, week_anchor, weekly_series,
+    _same_month_last_year, analyze, area_distribution, area_premium_trend, build_kpi,
+    cancel_rate_series, deal_type_stats, gap_investment_ratio, missing_regions,
+    monthly_series, record_highs, reference_month, anomaly_flags, cancel_analysis,
+    complex_histories, complex_shards, floor_premium, jeonse_ratio, jeonse_ratio_by_age,
+    matched_index, outside_agent_stats, party_stats, region_monthly, region_ranking,
+    renewal_hike_stats, rent_conversion_rate, settlement_series, summarize,
+    umd_breakdown, umd_ranking, week_anchor, weekly_series,
 )
 
 
@@ -1134,6 +1135,141 @@ class ComplexHistoryUnionAcrossSidoTest(unittest.TestCase):
         self.assertEqual(missing, [])
         # 인천 조각에는 실제로 신고가가 하나 잡혀 있어야 이 테스트 자체가 의미가 있다.
         self.assertGreaterEqual(result["record_highs"]["by_sido"]["인천광역시"]["high_count"], 1)
+
+
+class AreaPremiumTrendTest(unittest.TestCase):
+    """대형/소형 평형 간 평당가 격차(프리미엄)가 월별로 어떻게 움직이는지."""
+
+    def test_premium_relative_to_base_bucket(self):
+        rows = ([deal("2026-06", 60000, area=50) for _ in range(25)]      # ~60㎡ (기준)
+                + [deal("2026-06", 150000, area=140) for _ in range(25)])  # 135㎡~
+        out = area_premium_trend(rows, ["2026-06"], min_month_rows=20)
+        buckets = out["monthly"][0]["buckets"]
+        base, top = buckets["~60㎡"], buckets["135㎡~"]
+        self.assertIsNotNone(base["median_ppp"])
+        self.assertEqual(base["premium_pct"], 0.0)     # 기준 구간 자신과의 프리미엄은 0
+        expected = round((top["median_ppp"] - base["median_ppp"]) / base["median_ppp"] * 100, 1)
+        self.assertEqual(top["premium_pct"], expected)
+
+    def test_thin_bucket_reports_none_not_zero(self):
+        rows = [deal("2026-06", 60000, area=50) for _ in range(5)]        # min_month_rows=20 미달
+        out = area_premium_trend(rows, ["2026-06"], min_month_rows=20)
+        b = out["monthly"][0]["buckets"]["~60㎡"]
+        self.assertIsNone(b["median_ppp"])
+        self.assertIsNone(b["premium_pct"])
+        self.assertEqual(b["count"], 5)
+
+    def test_analyze_attaches_area_premium(self):
+        payload = {"meta": {}, "records": [deal("2026-06", 100000) for _ in range(5)]}
+        out = analyze(payload)
+        self.assertIn("area_premium", out)
+        self.assertIn("by_sido", out["area_premium"])
+
+
+def sale_age(ym, amount, build_year, apt="가나아파트", area=84.9, code="11680"):
+    d = deal(ym, amount, apt=apt, area=area, code=code)
+    d["build_year"] = build_year
+    return d
+
+
+class JeonseRatioByAgeTest(unittest.TestCase):
+    """건축연령대별 전세가율 - jeonse_ratio() 와 같은 짝짓기 규칙을 연식으로 다시 묶는다."""
+
+    def test_buckets_by_building_age(self):
+        sales_new = [sale_age("2026-06", 100000, 2024, apt="새아파트") for _ in range(2)]   # age=2
+        rents_new = [rent("2026-06", 40000, apt="새아파트") for _ in range(2)]
+        sales_old = [sale_age("2026-06", 100000, 1990, apt="오래된아파트") for _ in range(2)]  # age=36
+        rents_old = [rent("2026-06", 70000, apt="오래된아파트") for _ in range(2)]
+        out = jeonse_ratio_by_age(sales_new + sales_old, rents_new + rents_old,
+                                  this_year=2026, min_pairs=2, min_bucket_samples=1)
+        buckets = {b["bucket"]: b for b in out["buckets"]}
+        self.assertEqual(buckets["0~5년"]["jeonse_ratio_pct"], 40.0)
+        self.assertEqual(buckets["30~40년"]["jeonse_ratio_pct"], 70.0)
+        self.assertEqual(out["matched_pairs"], 2)
+
+    def test_min_bucket_samples_gate(self):
+        out = jeonse_ratio_by_age([sale_age("2026-06", 100000, 2024)], [rent("2026-06", 40000)],
+                                  this_year=2026, min_pairs=1, min_bucket_samples=5)
+        b = {b["bucket"]: b for b in out["buckets"]}["0~5년"]
+        self.assertIsNone(b["jeonse_ratio_pct"])
+        self.assertEqual(b["count"], 1)
+
+    def test_missing_build_year_excluded(self):
+        out = jeonse_ratio_by_age([deal("2026-06", 100000)], [rent("2026-06", 40000)],
+                                  this_year=2026, min_pairs=1, min_bucket_samples=1)
+        self.assertEqual(out["matched_pairs"], 0)
+
+    def test_analyze_attaches_jeonse_by_age_only_with_rent(self):
+        payload = {"meta": {}, "records": [sale_age("2026-06", 100000, 2024)]}
+        rp = {"records": [rent("2026-06", 40000)]}
+        out = analyze(payload, rent_payload=rp)
+        self.assertIn("jeonse_by_age", out)
+        self.assertNotIn("jeonse_by_age", analyze(payload))
+
+
+def sale_at(date_str, amount, floor, apt="가나아파트", area=84.9, code="11680"):
+    d = deal(date_str[:7], amount, apt=apt, area=area, code=code)
+    d["floor"] = floor
+    d["deal_date"] = date_str
+    return d
+
+
+def rent_at(date_str, deposit, floor, apt="가나아파트", area=84.9, monthly=0, code="11680"):
+    r = rent(date_str[:7], deposit, apt=apt, area=area, monthly=monthly, code=code)
+    r["floor"] = floor
+    r["deal_date"] = date_str
+    return r
+
+
+class GapInvestmentRatioTest(unittest.TestCase):
+    """갭투자 비율 - 매매 계약 전후로 같은 단지x타입x층에 새 전세 계약이 있는지."""
+
+    MONTHS = ["2026-06"]
+
+    def test_matched_within_window(self):
+        near = sale_at("2026-06-10", 100000, floor=5)
+        other_floor = [sale_at("2026-06-10", 100000, floor=9) for _ in range(9)]
+        rents = [rent_at("2026-06-20", 40000, floor=5)]     # 매매 10일 뒤, window(45일) 안
+        out = gap_investment_ratio([near] + other_floor, rents, self.MONTHS,
+                                   window_days=45, min_month_rows=1, min_region_rows=1)
+        self.assertEqual(out["eligible"], 10)
+        self.assertEqual(out["matched"], 1)
+        self.assertEqual(out["overall_pct"], 10.0)
+
+    def test_outside_window_not_matched(self):
+        sales = [sale_at("2026-06-01", 100000, floor=5) for _ in range(5)]
+        far_rent = [rent_at("2026-07-20", 40000, floor=5)]   # 49일 뒤 - window(45) 밖
+        out = gap_investment_ratio(sales, far_rent, self.MONTHS,
+                                   window_days=45, min_month_rows=1, min_region_rows=1)
+        self.assertEqual(out["matched"], 0)
+
+    def test_floor_mismatch_not_matched(self):
+        sales = [sale_at("2026-06-10", 100000, floor=5) for _ in range(5)]
+        rents = [rent_at("2026-06-15", 40000, floor=9) for _ in range(5)]   # 다른 층
+        out = gap_investment_ratio(sales, rents, self.MONTHS,
+                                   window_days=45, min_month_rows=1, min_region_rows=1)
+        self.assertEqual(out["matched"], 0)
+
+    def test_missing_floor_excluded_from_eligible(self):
+        sale_no_floor = sale_at("2026-06-10", 100000, floor=5)
+        sale_no_floor["floor"] = None
+        out = gap_investment_ratio([sale_no_floor], [], self.MONTHS,
+                                   min_month_rows=1, min_region_rows=1)
+        self.assertEqual(out["eligible"], 0)
+
+    def test_monthly_pct_gated_by_min_rows(self):
+        sales = [sale_at("2026-06-10", 100000, floor=5) for _ in range(5)]
+        rents = [rent_at("2026-06-15", 40000, floor=5) for _ in range(5)]
+        out = gap_investment_ratio(sales, rents, self.MONTHS, min_month_rows=10, min_region_rows=1)
+        self.assertIsNone(out["monthly"][0]["pct"])
+        self.assertEqual(out["monthly"][0]["count"], 5)
+
+    def test_analyze_attaches_gap_investment_only_with_rent(self):
+        payload = {"meta": {}, "records": [sale_at("2026-06-10", 100000, floor=5)]}
+        rp = {"records": [rent_at("2026-06-15", 40000, floor=5)]}
+        out = analyze(payload, rent_payload=rp)
+        self.assertIn("gap_investment", out)
+        self.assertNotIn("gap_investment", analyze(payload))
 
 
 if __name__ == "__main__":
