@@ -30,6 +30,40 @@ PAGE = r"""<!doctype html>
   --void:#0a1120; --void-2:#101b30;
   --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.28);
 }
+/* "지금" 은 위 기본값과 같은 팔레트다 - 속성값을 명시적으로 한 번 더 선언해 다른
+   테마들과 나란히 정의한다(속성이 아예 없는 상태에 의존하지 않는다). */
+html[data-theme="now"]{
+  --bg:#0d1524; --panel:#141f36; --panel-2:#1b2942; --line:#26375a;
+  --text:#e6edf8; --muted:#8ba0c4; --accent:#4b8ef7; --accent-soft:#1e3a68;
+  --up:#f0715f; --down:#4aa3e0;
+  --void:#0a1120; --void-2:#101b30;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.28);
+}
+/* 상승(--up)·하락(--down)은 가격 방향을 뜻하는 의미색이라 테마마다 브랜드 색을
+   따라가지 않는다 - 배경과의 대비만 살짝씩 맞춘다. 슬레이트+앰버는 예외로,
+   강조색 자체가 주황 계열(앰버)이라 상승색을 그대로 두면 서로 구분이 안 돼
+   좀 더 붉은쪽으로 틀었다. */
+html[data-theme="teal"]{
+  --bg:#081a1c; --panel:#0d2528; --panel-2:#123134; --line:#1f4245;
+  --text:#e7f3f1; --muted:#84a6a1; --accent:#22b8a6; --accent-soft:#0f3d38;
+  --up:#f0715f; --down:#4aa3e0;
+  --void:#061415; --void-2:#0a1c1e;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.28);
+}
+html[data-theme="midnight"]{
+  --bg:#070c18; --panel:#0e1830; --panel-2:#122043; --line:#1e2f54;
+  --text:#e9edf9; --muted:#8793b8; --accent:#5b8dff; --accent-soft:#1c2e5c;
+  --up:#ef7a68; --down:#5f97ff;
+  --void:#050912; --void-2:#0a1226;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.28);
+}
+html[data-theme="slate"]{
+  --bg:#15171b; --panel:#1d2026; --panel-2:#23272e; --line:#33383f;
+  --text:#ececea; --muted:#a1a4ab; --accent:#e2a13a; --accent-soft:#3a2c10;
+  --up:#ef5b6f; --down:#5b93d6;
+  --void:#0f1114; --void-2:#171a1f;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.28);
+}
 html[data-theme="light"]{
   --bg:#eef3fa; --panel:#fff; --panel-2:#f4f7fc; --line:#dce5f2;
   --text:#16233a; --muted:#61728d; --accent:#2563eb; --accent-soft:#dbe8fe;
@@ -246,7 +280,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
     <h1>__HEADING__</h1>
     <p class="sub" id="sub"></p>
   </div>
-  <button class="ghost" id="theme">라이트 모드</button>
+  <div class="filters" id="theme-picker" style="margin:0" role="group" aria-label="화면 테마 선택"></div>
 </header>
 
 <div id="banner"></div>
@@ -2991,21 +3025,36 @@ function renderMeta(){
 }
 
 /* ---------- 테마 ---------- */
-function initTheme(){
-  const saved = localStorage.getItem('apt-theme') || 'dark';
-  document.documentElement.dataset.theme = saved;
-  const btn = $('#theme');
-  const sync = () => btn.textContent =
-    document.documentElement.dataset.theme === 'dark' ? '라이트 모드' : '다크 모드';
-  sync();
-  btn.onclick = () => {
-    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-    document.documentElement.dataset.theme = next;
-    localStorage.setItem('apt-theme', next);
-    sync();
+// 상승·하락(--up/--down)은 고정하고 배경·강조색만 바꾼 네 가지 어두운 배색 +
+// 기존 라이트 모드. "지금"이 기본값이라 이전에 저장된 다크/라이트 두 값짜리
+// 설정도 자연스럽게 새 체계로 넘어온다(아래 마이그레이션).
+const THEMES = [
+  {key:'now',      label:'지금 · 네이비+블루'},
+  {key:'teal',     label:'비바샘 틸'},
+  {key:'midnight', label:'미드나잇 블루'},
+  {key:'slate',    label:'슬레이트+앰버'},
+  {key:'light',    label:'라이트'},
+];
+function renderThemePicker(){
+  const cur = document.documentElement.dataset.theme;
+  $('#theme-picker').innerHTML = THEMES.map(t =>
+    `<button class="chip" data-theme-key="${t.key}" aria-pressed="${t.key===cur}">${esc(t.label)}</button>`
+  ).join('');
+  $('#theme-picker').querySelectorAll('.chip').forEach(b => b.onclick = () => {
+    document.documentElement.dataset.theme = b.dataset.themeKey;
+    try { localStorage.setItem('apt-theme', b.dataset.themeKey); } catch (e) {}
+    renderThemePicker();
     // 지도 색은 SVG 안에 값으로 박혀 있어 CSS 변수만 바뀌어서는 따라오지 않는다.
     if (tab === 'map') renderMap();
-  };
+  });
+}
+function initTheme(){
+  let saved = null;
+  try { saved = localStorage.getItem('apt-theme'); } catch (e) {}
+  if (saved === 'dark') saved = 'now';              // 예전 두 값짜리 설정 이관
+  if (!THEMES.some(t => t.key === saved)) saved = 'now';
+  document.documentElement.dataset.theme = saved;
+  renderThemePicker();
 }
 
 function renderAll(){
