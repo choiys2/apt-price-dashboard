@@ -28,7 +28,7 @@ from lawd_codes import REGIONS, SIDO_ORDER, SPECIAL_AREAS, region_name
 # 시도 세 개 + 그보다 좁은 특정 택지지구(검단신도시 등)까지, 개요 탭의 지역 필터가
 # 실제로 고를 수 있는 전체 이름 집합. SIDO_ORDER 만 돌던 by_sido 루프 몇 곳은 이걸로
 # 바꿔야 특정 택지지구도 같은 필터 자리에서 채워진다.
-SCOPE_ORDER = SIDO_ORDER + [name for name, _, _ in SPECIAL_AREAS]
+SCOPE_ORDER = SIDO_ORDER + [name for name, _ in SPECIAL_AREAS]
 
 # 신고 지연으로 확정되지 않은 것으로 간주할 최근 개월 수
 PROVISIONAL_MONTHS = 2
@@ -1473,11 +1473,12 @@ def _special_area_split(records):
     """SPECIAL_AREAS 에 정의된 택지지구만큼 조각을 더 낸다. _sido_split 결과에
     update() 로 얹어 쓴다 - by_sido() 가 이미 slices.items() 를 통째로 도는
     제네릭 헬퍼라서, 그렇게만 해도 거기 걸리는 모든 지표에 자동으로 묻어간다.
+    한 택지지구가 시군구 여러 개(위례 등)에 걸쳐 있으면 그 시군구들을 합쳐 낸다.
     """
     out = {}
-    for name, lawd_cd, umds in SPECIAL_AREAS:
-        umd_set = set(umds)
-        out[name] = [r for r in records if r.get("lawd_cd") == lawd_cd and r.get("umd") in umd_set]
+    for name, sub_regions in SPECIAL_AREAS:
+        wanted = {(lawd_cd, umd) for lawd_cd, umds in sub_regions for umd in umds}
+        out[name] = [r for r in records if (r.get("lawd_cd"), r.get("umd")) in wanted]
     return out
 
 
@@ -1562,12 +1563,12 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
     # 개요 탭의 시도 필터 칩은 result["sido"] 를 그대로 읽는다. 택지지구 행을 같은
     # 자리에 더 붙이면, 프론트는 "검단신도시"도 서울·인천·경기와 똑같은 필터 항목으로
     # 다룬다(별도 분기 없이 monthlyFor/overallFor 가 그대로 찾아낸다).
-    for name, lawd_cd, _umds in SPECIAL_AREAS:
+    for name, _sub_regions in SPECIAL_AREAS:
         sl = sido_recs.get(name)
         if sl:
             result["sido"].append(_special_area_row(name, sl, months))
     if result["broker"]:
-        for name, lawd_cd, _umds in SPECIAL_AREAS:
+        for name, _sub_regions in SPECIAL_AREAS:
             sl = sido_broker.get(name)
             if sl:
                 result["broker"]["sido"].append(_special_area_row(name, sl, months))

@@ -1305,13 +1305,28 @@ class SpecialAreaSplitTest(unittest.TestCase):
                 gumdan_deal("2026-06", 100000, "왕길동"),   # 같은 구지만 신도시 핵심이 아니다
                 sido_deal("2026-06", 100000, "인천광역시")]  # 아예 다른 시군구(남동구)
         out = _special_area_split(recs)
-        self.assertEqual(set(out.keys()), {"검단신도시"})
+        self.assertIn("검단신도시", out)   # 등록된 택지지구 전부가 키로 나온다(빈 것도 포함)
         self.assertEqual(len(out["검단신도시"]), 2)
         self.assertEqual({r["umd"] for r in out["검단신도시"]}, {"당하동", "원당동"})
 
     def test_empty_when_no_matching_records(self):
         out = _special_area_split([sido_deal("2026-06", 100000, "서울특별시")])
         self.assertEqual(out["검단신도시"], [])
+
+    def test_merges_across_multiple_sigungu_for_a_multi_region_area(self):
+        # 위례신도시는 성남시 수정구·하남시·송파구 세 시군구에 걸쳐 있다 - 각 시군구의
+        # 위례 법정동 거래가 전부 "위례신도시" 한 조각으로 합쳐져야 한다.
+        recs = [
+            {"lawd_cd": "41131", "region": "경기도 성남시 수정구", "umd": "창곡동"},
+            {"lawd_cd": "41131", "region": "경기도 성남시 수정구", "umd": "신흥동"},  # 위례 아님
+            {"lawd_cd": "41450", "region": "경기도 하남시", "umd": "학암동"},
+            {"lawd_cd": "11710", "region": "서울특별시 송파구", "umd": "장지동"},
+            {"lawd_cd": "11710", "region": "서울특별시 송파구", "umd": "잠실동"},     # 위례 아님
+        ]
+        out = _special_area_split(recs)
+        self.assertEqual(len(out["위례신도시"]), 3)
+        self.assertEqual({(r["lawd_cd"], r["umd"]) for r in out["위례신도시"]},
+                         {("41131", "창곡동"), ("41450", "학암동"), ("11710", "장지동")})
 
 
 class SpecialAreaAnalyzeTest(unittest.TestCase):
