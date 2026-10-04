@@ -720,7 +720,17 @@ function overallFor(s){
   const e = v.sido.find(x => x.sido === s);
   return e ? e : {count:0, median_ppp:null, median_amount:null, avg_area:null};
 }
+// 서울·인천·경기 말고 "검단신도시"처럼 시군구보다 좁은 택지지구도 같은 필터
+// 자리에 들어온다 - D.sido 행에 umd_rows 가 있으면 그게 그 표식이다(시도 행에는
+// 없다). 표는 그 경우 시군구 대신 법정동으로 보여줘야 해서 regionsFor 만 따로 뗀다.
+function specialRow(s){
+  if (s === 'ALL') return null;
+  const e = V().sido.find(x => x.sido === s);
+  return (e && e.umd_rows) ? e : null;
+}
 function regionsFor(s){
+  const sp = specialRow(s);
+  if (sp) return query ? sp.umd_rows.filter(r => r.umd.includes(query)) : sp.umd_rows;
   const all = V().regions;
   const rows = s === 'ALL' ? all : all.filter(r => r.sido === s);
   return query ? rows.filter(r => r.region.includes(query)) : rows;
@@ -799,6 +809,14 @@ function renderKpi(){
     cards.push({label:`전년 동월 대비 (${ref.ym} vs ${yoy.ym})`,
       value: pct(change(ref.median_ppp, yoy.median_ppp)), unit:'평당가',
       foot: `거래량 ${pct(change(ref.count, yoy.count))}`});
+  } else if (specialRow(sido)) {
+    // 법정동 랭킹(umd_rows)에는 전월비(mom_ppp_pct)가 없다 - 시군구 랭킹과
+    // 달리 월별 비교 로직을 따로 안 태운다. 상승/하락 집계 대신 집계 대상
+    // 법정동 수만 보여준다.
+    const rows = regionsFor(sido);
+    cards.push({label:'집계 대상 법정동',
+      value:nf(rows.length), unit:'개',
+      foot:'거래 10건 이상인 법정동만 센다'});
   } else {
     const rows = regionsFor(sido);
     const up = rows.filter(r => r.mom_ppp_pct > 0).length;
@@ -1244,6 +1262,20 @@ const COLS = [
       ? '<span class="muted">–</span>' : r.outside_pct.toFixed(1) + '%'},
 ];
 
+// "검단신도시"처럼 택지지구 필터가 활성화되면 시군구 랭킹 대신 법정동 랭킹을
+// 보여준다 - umd_ranking() 출력이라 COLS 의 비중·기준월건수·전월비·외지중개는
+// 애초에 없다(시군구 단위로만 내는 값들이다).
+const UMD_COLS = [
+  {k:'rank',           t:'#',         f:r => r.rank},
+  {k:'umd',            t:'법정동',      f:r => `<span class="name">${esc(r.umd)}</span>`},
+  {k:'median_ppp',     t:'중위 평당가',  f:r => nf(r.median_ppp)},
+  {k:'iqr_ratio_pct',  t:'25~75% 구간', f:r => r.p25_ppp == null ? '<span class="muted">–</span>'
+      : `<span class="muted">${nf(r.p25_ppp)}~${nf(r.p75_ppp)}</span>`},
+  {k:'median_amount',  t:'중위 거래가',  f:r => fmtAmount(r.median_amount)},
+  {k:'count',          t:'거래건수',    f:r => nf(r.count)},
+  {k:'avg_area',       t:'평균 전용',   f:r => (r.avg_area ?? '–') + '㎡'},
+];
+
 function sorted(rows){
   return [...rows].sort((a,b) => {
     const av = a[sortKey], bv = b[sortKey];
@@ -1298,41 +1330,49 @@ function renderSortChips(container, fields, state, rerender){
 }
 
 function renderTable(){
-  $('#thr').innerHTML = COLS.map(c =>
+  const sp = specialRow(sido);
+  const cols = sp ? UMD_COLS : COLS;
+  $('#thr').innerHTML = cols.map(c =>
     `<th data-k="${c.k}"${c.k===sortKey?` aria-sort="${sortDir<0?'descending':'ascending'}"`:''}>`
     + `${c.t}${c.k===sortKey?(sortDir<0?' ▾':' ▴'):''}</th>`).join('');
   $('#thr').querySelectorAll('th').forEach(th => th.onclick = () => {
     const k = th.dataset.k;
     if (k === sortKey) sortDir *= -1;
-    else { sortKey = k; sortDir = (k === 'region' || k === 'rank') ? 1 : -1; }
+    else { sortKey = k; sortDir = (k === 'region' || k === 'umd' || k === 'rank') ? 1 : -1; }
     renderTable();
   });
 
   const rows = sorted(regionsFor(sido));
   $('#tb').innerHTML = rows.map(r =>
-    `<tr>${COLS.map(c => `<td>${c.f(r)}</td>`).join('')}</tr>`).join('')
-    || `<tr><td colspan="${COLS.length}" class="muted" style="text-align:center;padding:24px">
-        조건에 맞는 지역이 없다</td></tr>`;
-  $('#tblfoot').textContent =
-    `${rows.length}개 시군구 · 순위(#)는 중위 평당가 기준이며 항상 수도권 전체 대상으로 매긴다 · `
-    + `증감률은 기준월 ${D.kpi.ref_month}(확정) 대비다.`;
+    `<tr>${cols.map(c => `<td>${c.f(r)}</td>`).join('')}</tr>`).join('')
+    || `<tr><td colspan="${cols.length}" class="muted" style="text-align:center;padding:24px">
+        조건에 맞는 ${sp ? '법정동' : '지역'}이 없다</td></tr>`;
+  $('#tblfoot').textContent = sp
+    ? `${rows.length}개 법정동 · ${esc(sido)} 안에서 거래 10건 이상인 법정동만 낸다 · `
+      + `순위(#)는 중위 평당가 기준.`
+    : `${rows.length}개 시군구 · 순위(#)는 중위 평당가 기준이며 항상 수도권 전체 대상으로 매긴다 · `
+      + `증감률은 기준월 ${D.kpi.ref_month}(확정) 대비다.`;
 }
 
 function downloadCsv(){
+  const sp = specialRow(sido);
   const rows = sorted(regionsFor(sido));
-  const head = ['순위','지역','중위평당가(만원)','중위거래가(만원)','거래건수','비중(%)',
-                '25%(만원)','75%(만원)','평균전용(㎡)','기준월건수','전월비건수(%)','전월비평당가(%)',
-                '외지중개(%)'];
-  const body = rows.map(r => [r.rank, r.region, r.median_ppp, r.median_amount, r.count,
-    r.share_pct, r.p25_ppp, r.p75_ppp, r.avg_area, r.ref_count, r.mom_count_pct, r.mom_ppp_pct,
-    r.outside_pct]
+  const head = sp
+    ? ['순위','법정동','중위평당가(만원)','중위거래가(만원)','거래건수','25%(만원)','75%(만원)','평균전용(㎡)']
+    : ['순위','지역','중위평당가(만원)','중위거래가(만원)','거래건수','비중(%)',
+       '25%(만원)','75%(만원)','평균전용(㎡)','기준월건수','전월비건수(%)','전월비평당가(%)',
+       '외지중개(%)'];
+  const body = rows.map(r => (sp
+    ? [r.rank, r.umd, r.median_ppp, r.median_amount, r.count, r.p25_ppp, r.p75_ppp, r.avg_area]
+    : [r.rank, r.region, r.median_ppp, r.median_amount, r.count, r.share_pct, r.p25_ppp,
+       r.p75_ppp, r.avg_area, r.ref_count, r.mom_count_pct, r.mom_ppp_pct, r.outside_pct])
     .map(v => v == null ? '' : `"${String(v).replace(/"/g,'""')}"`).join(','));
   // 엑셀이 UTF-8을 인식하도록 BOM을 붙인다
   const blob = new Blob(['﻿' + [head.join(','), ...body].join('\r\n')],
                         {type:'text/csv;charset=utf-8'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `아파트실거래_시군구랭킹_${sido==='ALL'?'수도권':sido}_${D.kpi.period_to}.csv`;
+  a.download = `아파트실거래_${sp?'법정동':'시군구'}랭킹_${sido==='ALL'?'수도권':sido}_${D.kpi.period_to}.csv`;
   a.click();
   URL.revokeObjectURL(a.href);
 }

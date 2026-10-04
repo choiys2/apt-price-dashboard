@@ -23,7 +23,12 @@ from collections import Counter, defaultdict
 from datetime import date
 from statistics import median, quantiles
 
-from lawd_codes import REGIONS, SIDO_ORDER, region_name
+from lawd_codes import REGIONS, SIDO_ORDER, SPECIAL_AREAS, region_name
+
+# 시도 세 개 + 그보다 좁은 특정 택지지구(검단신도시 등)까지, 개요 탭의 지역 필터가
+# 실제로 고를 수 있는 전체 이름 집합. SIDO_ORDER 만 돌던 by_sido 루프 몇 곳은 이걸로
+# 바꿔야 특정 택지지구도 같은 필터 자리에서 채워진다.
+SCOPE_ORDER = SIDO_ORDER + [name for name, _, _ in SPECIAL_AREAS]
 
 # 신고 지연으로 확정되지 않은 것으로 간주할 최근 개월 수
 PROVISIONAL_MONTHS = 2
@@ -197,7 +202,10 @@ def umd_ranking(records, top_n=100):
         rows.append({"lawd_cd": code, "region": group[0]["region"], "umd": umd,
                      **summarize(group)})
     rows.sort(key=lambda r: r["median_ppp"] or 0, reverse=True)
-    return rows[:top_n]
+    rows = rows[:top_n]
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+    return rows
 
 
 def area_distribution(records):
@@ -1461,6 +1469,30 @@ def _sido_split(records):
     return out
 
 
+def _special_area_split(records):
+    """SPECIAL_AREAS 에 정의된 택지지구만큼 조각을 더 낸다. _sido_split 결과에
+    update() 로 얹어 쓴다 - by_sido() 가 이미 slices.items() 를 통째로 도는
+    제네릭 헬퍼라서, 그렇게만 해도 거기 걸리는 모든 지표에 자동으로 묻어간다.
+    """
+    out = {}
+    for name, lawd_cd, umds in SPECIAL_AREAS:
+        umd_set = set(umds)
+        out[name] = [r for r in records if r.get("lawd_cd") == lawd_cd and r.get("umd") in umd_set]
+    return out
+
+
+def _special_area_row(name, records, months):
+    """sido_rollup() 한 행과 같은 모양(요약값 + monthly + weekly)을 만들고, 거기에
+    umd_rows(법정동별 랭킹)를 더 얹는다. 이 모양 그대로 result["sido"] 뒤에 붙이면
+    프론트의 monthlyFor/overallFor/weeklyFor 가 시도 필터와 똑같이 다룬다 - 시군구
+    랭킹 표만 umd_rows 유무로 "법정동 모드"인지 구분해 따로 그린다.
+    """
+    return {"sido": name, **summarize(records),
+            "monthly": monthly_series(records, months),
+            "weekly": weekly_series(records, anchor=week_anchor(records)),
+            "umd_rows": umd_ranking(records, top_n=20)}
+
+
 def analyze(payload, include_canceled=False, expected_regions=None, rent_payload=None):
     raw = payload["records"]
     records = raw if include_canceled else [r for r in raw if not r.get("canceled")]
@@ -1475,8 +1507,11 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
     # 보여주려면, 같은 집계 함수를 시도별로 한 번씩 더 돌려야 한다. 원본 records/raw/
     # broker/rr 를 각각 쪼갠다.
     sido_recs = _sido_split(records)
+    sido_recs.update(_special_area_split(records))
     sido_raw = _sido_split(raw)
+    sido_raw.update(_special_area_split(raw))
     sido_broker = _sido_split(broker)
+    sido_broker.update(_special_area_split(broker))
 
     def by_sido(fn, slices, *args, **kwargs):
         return {s: fn(rs, *args, **kwargs) for s, rs in slices.items() if rs}
@@ -1520,10 +1555,23 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
         # 노후 단지의 웃돈이 실제보다 작게 나온다.
         "rebuild": {**rebuild_premium(broker or records, months),
                    "by_sido": {s: rebuild_premium(sido_broker.get(s) or sido_recs.get(s, []), months)
-                              for s in SIDO_ORDER if sido_recs.get(s)}},
+                              for s in SCOPE_ORDER if sido_recs.get(s)}},
         "area_premium": {**area_premium_trend(records, months),
                          "by_sido": by_sido(area_premium_trend, sido_recs, months)},
     }
+    # 개요 탭의 시도 필터 칩은 result["sido"] 를 그대로 읽는다. 택지지구 행을 같은
+    # 자리에 더 붙이면, 프론트는 "검단신도시"도 서울·인천·경기와 똑같은 필터 항목으로
+    # 다룬다(별도 분기 없이 monthlyFor/overallFor 가 그대로 찾아낸다).
+    for name, lawd_cd, _umds in SPECIAL_AREAS:
+        sl = sido_recs.get(name)
+        if sl:
+            result["sido"].append(_special_area_row(name, sl, months))
+    if result["broker"]:
+        for name, lawd_cd, _umds in SPECIAL_AREAS:
+            sl = sido_broker.get(name)
+            if sl:
+                result["broker"]["sido"].append(_special_area_row(name, sl, months))
+
     rh = record_highs(records, months)
     rh_by_sido = by_sido(record_highs, sido_recs, months)
     rh["by_sido"] = rh_by_sido
@@ -1555,10 +1603,11 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
     if rent_payload:
         rr = rent_payload.get("records", [])
         sido_rent = _sido_split(rr)
+        sido_rent.update(_special_area_split(rr))
         result["jeonse"] = jeonse_ratio(records, rr)
         result["jeonse"]["by_sido"] = {
             s: jeonse_ratio(sido_recs[s], sido_rent[s])
-            for s in SIDO_ORDER if sido_recs.get(s) and sido_rent.get(s)
+            for s in SCOPE_ORDER if sido_recs.get(s) and sido_rent.get(s)
         }
         result["meta"]["rent_record_count"] = len(rr)
         result["meta"]["jeonse_record_count"] = sum(1 for r in rr if r.get("is_jeonse"))
@@ -1569,20 +1618,20 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
         result["rent_conversion"] = rent_conversion_rate(records, rr, months)
         result["rent_conversion"]["by_sido"] = {
             s: rent_conversion_rate(sido_recs[s], sido_rent[s], months)
-            for s in SIDO_ORDER if sido_recs.get(s) and sido_rent.get(s)
+            for s in SCOPE_ORDER if sido_recs.get(s) and sido_rent.get(s)
         }
         # 신축일수록 전세가율이 낮다는 통설을 준공연도 구간별로 확인한다.
         result["jeonse_by_age"] = jeonse_ratio_by_age(records, rr)
         result["jeonse_by_age"]["by_sido"] = {
             s: jeonse_ratio_by_age(sido_recs[s], sido_rent[s])
-            for s in SIDO_ORDER if sido_recs.get(s) and sido_rent.get(s)
+            for s in SCOPE_ORDER if sido_recs.get(s) and sido_rent.get(s)
         }
         # 갭투자(전세를 낀 매매) 비율 - 매매 계약 전후로 같은 단지x타입x층에서
         # 새 전세 계약이 신고되는지를 본다.
         result["gap_investment"] = gap_investment_ratio(records, rr, months)
         result["gap_investment"]["by_sido"] = {
             s: gap_investment_ratio(sido_recs[s], sido_rent[s], months)
-            for s in SIDO_ORDER if sido_recs.get(s) and sido_rent.get(s)
+            for s in SCOPE_ORDER if sido_recs.get(s) and sido_rent.get(s)
         }
     return result
 

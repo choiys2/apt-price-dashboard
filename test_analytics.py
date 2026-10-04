@@ -4,13 +4,13 @@ import unittest
 
 from apt_analytics import (
     PROVISIONAL_MONTHS, _area_type, _is_broker, _pct_change, _prev_ym, _sido_split,
-    _same_month_last_year, analyze, area_distribution, area_premium_trend, build_kpi,
-    cancel_rate_series, deal_type_stats, gap_investment_ratio, missing_regions,
-    monthly_series, record_highs, reference_month, anomaly_flags, cancel_analysis,
-    complex_histories, complex_shards, floor_premium, jeonse_ratio, jeonse_ratio_by_age,
-    matched_index, outside_agent_stats, party_stats, region_monthly, region_ranking,
-    renewal_hike_stats, rent_conversion_rate, settlement_series, summarize,
-    umd_breakdown, umd_ranking, week_anchor, weekly_series,
+    _same_month_last_year, _special_area_split, analyze, area_distribution,
+    area_premium_trend, build_kpi, cancel_rate_series, deal_type_stats,
+    gap_investment_ratio, missing_regions, monthly_series, record_highs,
+    reference_month, anomaly_flags, cancel_analysis, complex_histories, complex_shards,
+    floor_premium, jeonse_ratio, jeonse_ratio_by_age, matched_index, outside_agent_stats,
+    party_stats, region_monthly, region_ranking, renewal_hike_stats, rent_conversion_rate,
+    settlement_series, summarize, umd_breakdown, umd_ranking, week_anchor, weekly_series,
 )
 
 
@@ -1270,6 +1270,102 @@ class GapInvestmentRatioTest(unittest.TestCase):
         out = analyze(payload, rent_payload=rp)
         self.assertIn("gap_investment", out)
         self.assertNotIn("gap_investment", analyze(payload))
+
+
+GUMDAN_CODE, GUMDAN_REGION = "28290", "인천광역시 검단구"
+
+
+def gumdan_deal(ym, amount, umd, apt="가나아파트", area=84.9, gbn="중개거래", floor=5):
+    ppp = round(amount / (area / PYEONG))
+    return {
+        "lawd_cd": GUMDAN_CODE, "region": GUMDAN_REGION, "umd": umd, "apt": apt,
+        "area_m2": area, "amount_manwon": amount, "deal_ym": ym, "deal_date": f"{ym}-15",
+        "price_per_pyeong": ppp, "price_per_m2": round(amount / area, 2),
+        "canceled": False, "floor": floor, "area_type": int(area),
+        "deal_gbn": gbn, "is_broker": gbn != "직거래",
+    }
+
+
+def gumdan_rent(ym, deposit, umd, monthly=0, apt="가나아파트", atype=84):
+    return {
+        "lawd_cd": GUMDAN_CODE, "region": GUMDAN_REGION, "umd": umd, "apt": apt,
+        "area_type": atype, "deposit_manwon": deposit, "monthly_manwon": monthly,
+        "is_jeonse": monthly == 0, "deal_ym": ym, "contract_type": None,
+        "use_rr_right": False, "pre_deposit_manwon": None, "hike_pct": None,
+    }
+
+
+class SpecialAreaSplitTest(unittest.TestCase):
+    """검단신도시 = 검단구 안에서도 신도시 핵심 법정동(당하·원당·마전·불로동)만이다.
+    같은 구의 옛 서구 외곽 마을(왕길동 등)은 걸러져야 한다."""
+
+    def test_keeps_only_listed_umds_in_the_right_lawd_cd(self):
+        recs = [gumdan_deal("2026-06", 100000, "당하동"),
+                gumdan_deal("2026-06", 100000, "원당동"),
+                gumdan_deal("2026-06", 100000, "왕길동"),   # 같은 구지만 신도시 핵심이 아니다
+                sido_deal("2026-06", 100000, "인천광역시")]  # 아예 다른 시군구(남동구)
+        out = _special_area_split(recs)
+        self.assertEqual(set(out.keys()), {"검단신도시"})
+        self.assertEqual(len(out["검단신도시"]), 2)
+        self.assertEqual({r["umd"] for r in out["검단신도시"]}, {"당하동", "원당동"})
+
+    def test_empty_when_no_matching_records(self):
+        out = _special_area_split([sido_deal("2026-06", 100000, "서울특별시")])
+        self.assertEqual(out["검단신도시"], [])
+
+
+class SpecialAreaAnalyzeTest(unittest.TestCase):
+    """analyze() 가 검단신도시를 시도 필터와 같은 자리(result["sido"])에 끼워 넣고,
+    by_sido 가 걸리는 지표 전반에 "검단신도시" 키로 묻어가는지."""
+
+    def _payload(self):
+        # 신도시 핵심 두 법정동은 umd_ranking 의 min_deals(10) 을 넘기고, 왕길동은
+        # 같은 구인데도 umd_rows 에 나오면 안 된다(=법정동 필터가 실제로 걸렀는지 증거).
+        sale = ([gumdan_deal("2026-06", 100000 + i * 100, "당하동") for i in range(12)]
+                + [gumdan_deal("2026-06", 90000 + i * 100, "원당동") for i in range(11)]
+                + [gumdan_deal("2026-06", 80000 + i * 100, "왕길동") for i in range(12)]
+                + [sido_deal("2026-06", 100000, "서울특별시") for _ in range(10)]
+                + [sido_deal("2026-06", 80000, "경기도") for _ in range(10)])
+        rent = ([gumdan_rent("2026-06", 30000 + i * 100, "당하동") for i in range(10)]
+                + [sido_rent("2026-06", 40000, "서울특별시") for _ in range(10)])
+        return {"meta": {}, "records": sale}, {"records": rent}
+
+    def test_special_area_row_appended_to_sido_list_with_umd_rows(self):
+        payload, _ = self._payload()
+        result = analyze(payload)
+        row = next((r for r in result["sido"] if r["sido"] == "검단신도시"), None)
+        self.assertIsNotNone(row)
+        # sido_rollup() 한 행과 같은 모양이어야 프론트의 monthlyFor/overallFor 가 그대로 먹는다.
+        for key in ("count", "median_ppp", "monthly", "weekly", "umd_rows"):
+            self.assertIn(key, row)
+        self.assertEqual(row["count"], 23)   # 당하 12 + 원당 11 - 왕길동 12건은 애초에 빠진다
+        umd_names = {u["umd"] for u in row["umd_rows"]}
+        self.assertEqual(umd_names, {"당하동", "원당동"})   # 왕길동은 umd_rows 에도 없다
+
+    def test_by_sido_metrics_include_special_area_key(self):
+        payload, rent_payload = self._payload()
+        result = analyze(payload, rent_payload=rent_payload)
+        sale_keys = ["deal_type", "settlement", "matched_index", "area_premium", "cancels"]
+        for key in sale_keys:
+            self.assertIn("검단신도시", result[key]["by_sido"], key)
+        # 전세가율류는 검단신도시 전월세 표본(당하동)이 있어야만 채워진다.
+        for key in ("jeonse", "renewal_hike", "rent_conversion", "jeonse_by_age", "gap_investment"):
+            self.assertIn("검단신도시", result[key]["by_sido"], key)
+
+    def test_rent_dependent_metrics_skip_special_area_without_rent_sample(self):
+        sale, _ = self._payload()
+        # 전월세는 검단신도시 표본 없이 서울만 준다 - 검단신도시는 매매만 있고 전세가 없다.
+        rent_payload = {"records": [sido_rent("2026-06", 40000, "서울특별시") for _ in range(10)]}
+        result = analyze(sale, rent_payload=rent_payload)
+        self.assertNotIn("검단신도시", result["jeonse"]["by_sido"])
+        self.assertNotIn("검단신도시", result["gap_investment"]["by_sido"])
+
+    def test_broker_view_also_carries_special_area_row(self):
+        payload, _ = self._payload()
+        result = analyze(payload)
+        self.assertIsNotNone(result["broker"])
+        row = next((r for r in result["broker"]["sido"] if r["sido"] == "검단신도시"), None)
+        self.assertIsNotNone(row)
 
 
 if __name__ == "__main__":
