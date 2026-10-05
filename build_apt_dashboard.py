@@ -21,6 +21,9 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 검색엔진에 노출시키지 않는다 - 개인이 보는 실거래 분석용 페이지라 구글 등에서
+     검색되면 안 된다. robots.txt(사이트 루트)와 이중으로 막는다. -->
+<meta name="robots" content="noindex, nofollow, noarchive">
 <title>__TITLE__</title>
 <style>
 :root{
@@ -3179,6 +3182,13 @@ def render(analytics, out_path, boundaries=None):
             .replace("__DATA__", embed(analytics)))
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
+
+    # 검색엔진 차단은 페이지 안 <meta robots> 하나로는 부족하다 - 그건 크롤러가 이미
+    # 들어와서 읽어야 적용되는데, robots.txt 가 있으면 애초에 들어오지도 않는다.
+    # index.html 과 같은 디렉터리(배포 루트)에 둬야 사이트 루트에서 서빙된다.
+    robots_path = os.path.join(os.path.dirname(out_path) or ".", "robots.txt")
+    with open(robots_path, "w", encoding="utf-8") as f:
+        f.write("User-agent: *\nDisallow: /\n")
     return out_path
 
 
