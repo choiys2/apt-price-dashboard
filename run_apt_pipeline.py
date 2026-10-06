@@ -142,7 +142,8 @@ def main():
     months = sorted({r["deal_ym"] for r in records})
     hist_dir = os.path.join(args.out_dir, "history")
     os.makedirs(hist_dir, exist_ok=True)
-    shards = complex_shards(records, months)
+    rent_records = rent_payload.get("records", []) if rent_payload else []
+    shards = complex_shards(records, months, rent_records=rent_records)
     total_kb = 0
     for code, payload in shards.items():
         p = os.path.join(hist_dir, f"{code}.json")

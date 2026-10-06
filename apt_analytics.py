@@ -479,8 +479,9 @@ def umd_breakdown(records, min_deals=10, top_per_region=12):
     return {"regions": result, "min_deals": min_deals, "top_per_region": top_per_region}
 
 
-def complex_shards(records, months, min_dong_deals=5):
-    """시군구별 단지 x 전용타입 월별 궤적 + 동별 시세 편차. 관심단지가 필요할 때만 내려받는 조각들.
+def complex_shards(records, months, rent_records=None, min_dong_deals=5, gap_window_days=45):
+    """시군구별 단지 x 전용타입 월별 궤적 + 동별 시세 편차 + 갭투자 신호. 관심단지가
+    필요할 때만 내려받는 조각들.
 
     전부 페이지에 심으면 안 되는 이유는 재봤다 - 조합이 31,910개고 15개월치를 다 실으면
     2.8MB 가 는다. index.html 이 이미 1.7MB 라 첫 화면이 그만큼 느려진다. 반면 관심단지는
@@ -494,7 +495,13 @@ def complex_shards(records, months, min_dong_deals=5):
     단지에서 중위 5.4%(p75 9.3%) 편차가 실측된다. 조망·향·단지 내 위치 때문일 것으로
     보이지만 이 데이터만으로는 원인을 알 수 없어 "프리미엄"이 아니라 "편차"라 부른다.
 
-    행 형식은 [단지명, 전용타입, [[월인덱스, 중위거래가, 건수], ...], [[동, 중위평당가, 건수], ...]] 다.
+    갭투자 신호 - gap_investment_ratio() 와 같은 규칙(매매 전후 gap_window_days 일
+    안에 같은 층 전세 계약)을 이 단지 x 전용타입 하나로 좁혀 쓴다. 관심단지는
+    몇 개 안 되니 여기서는 신호가 난 매매의 계약일을 그대로 보여줄 수 있다(전체
+    갭투자 카드처럼 비율로 뭉뚱그리지 않는다).
+
+    행 형식은 [단지명, 전용타입, [[월인덱스, 중위거래가, 건수], ...],
+    [[동, 중위평당가, 건수], ...], [갭투자 신호 난 계약일, ...]] 다.
     키 이름을 3만 번 반복하지 않으려고 배열로 눕혔다.
     """
     by_region = defaultdict(lambda: defaultdict(list))
@@ -506,6 +513,28 @@ def complex_shards(records, months, min_dong_deals=5):
         if r["deal_ym"] not in idx:
             continue
         by_region[r["lawd_cd"]][(r["apt"], atype)].append(r)
+
+    jeonse_by_key = defaultdict(list)
+    for r in (rent_records or []):
+        if (r.get("is_jeonse") and r.get("apt") and r.get("area_type")
+                and r.get("floor") is not None):
+            jeonse_by_key[(r["lawd_cd"], r["apt"], r["area_type"], r["floor"])].append(r["deal_date"])
+
+    def gap_dates(code, apt, atype, rs):
+        if not jeonse_by_key:
+            return []
+        hits = []
+        for r in rs:
+            floor = r.get("floor")
+            if floor is None:
+                continue
+            jeonse = jeonse_by_key.get((code, apt, atype, floor))
+            if not jeonse:
+                continue
+            sd = date.fromisoformat(r["deal_date"])
+            if any(abs((date.fromisoformat(jd) - sd).days) <= gap_window_days for jd in jeonse):
+                hits.append(r["deal_date"])
+        return sorted(set(hits))[-5:]   # 최근 5건만 - 조각 크기를 늘리지 않는다
 
     shards = {}
     for code, groups in by_region.items():
@@ -524,16 +553,17 @@ def complex_shards(records, months, min_dong_deals=5):
             dongs = ([[d, round(median(v)), len(v)] for d, v in
                       sorted(qualified.items(), key=lambda kv: -median(kv[1]))]
                      if len(qualified) >= 2 else [])
-            rows.append([apt, atype, points, dongs])
+            rows.append([apt, atype, points, dongs, gap_dates(code, apt, atype, rs)])
         rows.sort(key=lambda x: (x[0], x[1]))
         shards[code] = {
             "lawd_cd": code,
             "region": region_name(code),
             "months": months,
-            "columns": ["apt", "area_type", "points", "dongs"],
+            "columns": ["apt", "area_type", "points", "dongs", "gap_dates"],
             "point_columns": ["month_index", "median_amount", "count"],
             "dong_columns": ["dong", "median_ppp", "count"],
             "min_dong_deals": min_dong_deals,
+            "gap_window_days": gap_window_days,
             "rows": rows,
         }
     return shards
@@ -1482,16 +1512,29 @@ def _special_area_split(records):
     return out
 
 
-def _special_area_row(name, records, months):
+def _special_area_row(name, records, months, parent_records=None):
     """sido_rollup() 한 행과 같은 모양(요약값 + monthly + weekly)을 만들고, 거기에
     umd_rows(법정동별 랭킹)를 더 얹는다. 이 모양 그대로 result["sido"] 뒤에 붙이면
     프론트의 monthlyFor/overallFor/weeklyFor 가 시도 필터와 똑같이 다룬다 - 시군구
     랭킹 표만 umd_rows 유무로 "법정동 모드"인지 구분해 따로 그린다.
+
+    parent_records 를 주면 - 이 택지지구가 걸쳐 있는 시군구(들) 전체 거래 - 그
+    시군구 대비 프리미엄도 같이 낸다. 신도시 하나가 시군구 여러 개(위례 등)에
+    걸쳐 있으면 그 시군구들을 합쳐 기준선 하나로 쓴다. 거친 기준이지만("판교동
+    중위" 대 "분당구 원도심 포함 전체 중위") 어느 방향으로건 신도시가 주변
+    시세보다 비싼지 싼지는 이 정도로도 드러난다.
     """
-    return {"sido": name, **summarize(records),
-            "monthly": monthly_series(records, months),
-            "weekly": weekly_series(records, anchor=week_anchor(records)),
-            "umd_rows": umd_ranking(records, top_n=20)}
+    row = {"sido": name, **summarize(records),
+           "monthly": monthly_series(records, months),
+           "weekly": weekly_series(records, anchor=week_anchor(records)),
+           "umd_rows": umd_ranking(records, top_n=20)}
+    if parent_records:
+        parent = summarize(parent_records)
+        row["parent_median_ppp"] = parent["median_ppp"]
+        row["parent_premium_pct"] = (
+            round((row["median_ppp"] - parent["median_ppp"]) / parent["median_ppp"] * 100, 1)
+            if row["median_ppp"] and parent["median_ppp"] else None)
+    return row
 
 
 def analyze(payload, include_canceled=False, expected_regions=None, rent_payload=None):
@@ -1563,15 +1606,20 @@ def analyze(payload, include_canceled=False, expected_regions=None, rent_payload
     # 개요 탭의 시도 필터 칩은 result["sido"] 를 그대로 읽는다. 택지지구 행을 같은
     # 자리에 더 붙이면, 프론트는 "검단신도시"도 서울·인천·경기와 똑같은 필터 항목으로
     # 다룬다(별도 분기 없이 monthlyFor/overallFor 가 그대로 찾아낸다).
-    for name, _sub_regions in SPECIAL_AREAS:
+    for name, sub_regions in SPECIAL_AREAS:
         sl = sido_recs.get(name)
         if sl:
-            result["sido"].append(_special_area_row(name, sl, months))
+            parent_lawds = {lawd_cd for lawd_cd, _umds in sub_regions}
+            parent_recs = [r for r in records if r.get("lawd_cd") in parent_lawds]
+            result["sido"].append(_special_area_row(name, sl, months, parent_records=parent_recs))
     if result["broker"]:
-        for name, _sub_regions in SPECIAL_AREAS:
+        for name, sub_regions in SPECIAL_AREAS:
             sl = sido_broker.get(name)
             if sl:
-                result["broker"]["sido"].append(_special_area_row(name, sl, months))
+                parent_lawds = {lawd_cd for lawd_cd, _umds in sub_regions}
+                parent_recs = [r for r in broker if r.get("lawd_cd") in parent_lawds]
+                result["broker"]["sido"].append(
+                    _special_area_row(name, sl, months, parent_records=parent_recs))
 
     rh = record_highs(records, months)
     rh_by_sido = by_sido(record_highs, sido_recs, months)

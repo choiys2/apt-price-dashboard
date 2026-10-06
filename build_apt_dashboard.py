@@ -247,11 +247,14 @@ td.name{font-weight:560}
 /* --- 예산 폼 / 분포 막대 --- */
 .budget-form{display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:13.5px}
 .budget-form label{display:flex;align-items:center;gap:7px;color:var(--muted)}
-.budget-form input{background:var(--panel-2);border:1px solid var(--line);color:var(--text);
-  border-radius:8px;padding:7px 11px;font:inherit;font-size:13.5px;
+.budget-form input,.budget-form select{background:var(--panel-2);border:1px solid var(--line);
+  color:var(--text);border-radius:8px;padding:7px 11px;font:inherit;font-size:13.5px;
   font-variant-numeric:tabular-nums}
 .budget-form input[type=number]{width:110px;text-align:right}
-.budget-form input:focus{outline:none;border-color:var(--accent)}
+.budget-form input:focus,.budget-form select:focus{outline:none;border-color:var(--accent)}
+.cmp-grid{display:grid;grid-template-columns:1fr 100px 100px;gap:6px 14px;font-size:13.5px}
+.cmp-grid .cmp-h{color:var(--muted);font-size:12px}
+.cmp-grid .cmp-v{text-align:right;font-variant-numeric:tabular-nums}
 .dist{display:grid;gap:10px}
 .dist-row{display:grid;grid-template-columns:92px 1fr 232px;gap:12px;align-items:center;
   font-size:13.5px}
@@ -296,6 +299,9 @@ footer ul{padding-left:18px;margin:8px 0 0}
 
 <div class="filters" id="filters"></div>
 <div class="filters" id="dealfilters"></div>
+<div class="filters" id="viewlink" style="justify-content:flex-end">
+  <button class="ghost" id="share-link">현재 보기 링크 복사</button>
+</div>
 
 <!-- ===================== 개요 ===================== -->
 <div id="pane-overview">
@@ -370,6 +376,25 @@ footer ul{padding-left:18px;margin:8px 0 0}
 <section class="card">
   <h2>전용면적 구간별 거래 비중 · 중위 평당가</h2>
   <div class="dist" id="dist"></div>
+</section>
+
+<section class="card">
+  <h2>시군구 · 신도시 비교</h2>
+  <p class="sub" style="margin:0 0 12px">두 지역을 골라 나란히 비교한다. 시군구와
+    신도시(검단·판교·미사·위례 등 택지지구 전용 필터)를 섞어서 골라도 된다.</p>
+  <div class="budget-form">
+    <label>A <select id="cmp-a"></select></label>
+    <label>B <select id="cmp-b"></select></label>
+  </div>
+  <div id="cmp-body" style="margin-top:14px"></div>
+</section>
+
+<section class="card" id="newtown-card" style="display:none">
+  <h2>신도시 프리미엄</h2>
+  <p class="sub" id="newtown-note" style="margin:0 0 12px"></p>
+  <div class="filters" style="margin:0 0 10px" id="newtown-sort"></div>
+  <div class="dist" id="newtown"></div>
+  <p class="sub" id="newtown-warn" style="margin-top:12px"></p>
 </section>
 
 <section class="card" id="area-premium-card" style="display:none">
@@ -632,6 +657,12 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <h2>동(건물)별 시세 편차</h2>
   <p class="sub" id="w-dong-note" style="margin:0 0 14px"></p>
   <div id="w-dong"></div>
+</section>
+
+<section class="card" id="w-gap-card" style="display:none">
+  <h2>갭투자 신호</h2>
+  <p class="sub" id="w-gap-note" style="margin:0 0 14px"></p>
+  <div id="w-gap"></div>
 </section>
 
 </div><!-- /pane-watch -->
@@ -1798,6 +1829,7 @@ function trackOf(k){
   if (!sh || sh === 'fail') return null;
   const hit = sh.rows.find(r => r[0] === apt && String(r[1]) === at);
   return hit ? {months: sh.months, points: hit[2], dongs: hit[3] || [],
+               gapDates: hit[4] || [], gapWindowDays: sh.gap_window_days,
                minDongDeals: sh.min_dong_deals} : null;
 }
 
@@ -1838,6 +1870,35 @@ function renderWatchDongs(rows){
   }).join('');
 }
 function round1(v){ return Math.round(v * 10) / 10; }
+
+/* ---------- 관심단지 갭투자 신호 ----------
+   gap_investment_ratio() 와 같은 규칙(매매 전후 gap_window_days 일 안에 같은 층 전세
+   계약)을 단지 하나로 좁혀 쓴다. 관심단지는 몇 개 안 되니 비율로 뭉뚱그리지 않고
+   신호가 난 매매 계약일을 그대로 보여준다. 전체 갭투자 카드와 같은 한계를 물려받는다 -
+   층까지만 맞춰보므로 대단지는 같은 층 다른 세대의 우연한 전세와 구분이 안 되고,
+   기존 세입자를 승계하는 갭투자는 전세 신고 자체가 없어 못 잡는다. */
+function renderWatchGapSignal(rows){
+  const items = [];
+  for (const {k, row} of rows){
+    if (!row) continue;
+    const t = trackOf(k);
+    if (t && t.gapDates && t.gapDates.length)
+      items.push({name: `${row[PIC.apt]} ${row[PIC.area_type]}㎡`, dates: t.gapDates,
+                  windowDays: t.gapWindowDays});
+  }
+  if (!items.length){ $('#w-gap-card').style.display = 'none'; return; }
+  $('#w-gap-card').style.display = '';
+  $('#w-gap-note').innerHTML =
+    `담은 단지 중 <b style="color:var(--text)">${items.length}개</b>에서 매매 전후 `
+    + `${items[0].windowDays}일 안에 같은 층 전세 계약이 함께 신고됐다(최근 5건까지만 보여준다). `
+    + `<span class="muted">같은 층이라도 대단지는 세대가 여럿이라 실제로는 무관한 다른 `
+    + `세대의 전세일 수 있고, 매수 전부터 살던 세입자를 그대로 승계하는 갭투자는 전세 `
+    + `신고 자체가 없어 여기 안 잡힌다 — "그럴 수 있다"는 참고 신호일 뿐 확정 판정이 아니다.</span>`;
+  $('#w-gap').innerHTML = items.map(it => `<div style="margin-bottom:10px">
+      <div style="font-size:13.5px;font-weight:600;margin-bottom:4px">${esc(it.name)}</div>
+      <div class="muted" style="font-size:13px">${it.dates.map(esc).join(', ')}</div>
+    </div>`).join('');
+}
 
 function renderWatchTrack(rows){
   const items = [];
@@ -1905,8 +1966,9 @@ function renderWatchTrack(rows){
 }
 
 function renderSlope(rows){
-  // 동별 편차는 궤적과 별개 정보라 슬로프로 떨어지는 것과 무관하게 항상 시도한다.
+  // 동별 편차·갭투자 신호는 궤적과 별개 정보라 슬로프로 떨어지는 것과 무관하게 항상 시도한다.
   renderWatchDongs(rows);
+  renderWatchGapSignal(rows);
   // 궤적 조각을 받았으면 그쪽이 낫다. 못 받았을 때만 두 점짜리 슬로프로 떨어진다.
   if (renderWatchTrack(rows)) return;
   const items = rows.filter(r => r.row && changePct(r.row) != null);
@@ -1976,6 +2038,37 @@ function watchFromHash(){
   } catch (e){ return false; }
   if (added) saveWatch();
   return added > 0;
+}
+
+/* --- 현재 필터 공유 링크 ---
+   시도·거래유형·탭·정렬 상태를 주소 뒤에 실어, 그 링크를 열면 같은 화면이 그대로
+   복원된다. watchFromHash 의 #w= 와 같은 자리(location.hash)를 쓰므로 이름만 f= 로
+   다르게 둔다 - 두 공유 링크를 동시에 열 수는 없지만(한쪽이 해시를 덮어쓴다), 둘 다
+   "그때그때 눌러서 복사하는" 1회성 링크라 그 정도 제약은 받아들인다. */
+let restoredTab = null;
+function filterToHash(){
+  const parts = [sido, dealType, tab, sortKey, String(sortDir)].map(encodeURIComponent);
+  return '#f=' + parts.join(',');
+}
+function filterFromHash(){
+  const m = /[#&]f=([^&]+)/.exec(location.hash);
+  if (!m) return;
+  let parts;
+  try { parts = m[1].split(',').map(decodeURIComponent); } catch (e) { return; }
+  const [s, dt, tb, sk, sdStr] = parts;
+  if (s && (s === 'ALL' || D.sido.some(x => x.sido === s))) sido = s;
+  if (dt === 'all' || dt === 'broker') dealType = dt;
+  if (sk) sortKey = sk;
+  const sd = +sdStr;
+  if (sd === 1 || sd === -1) sortDir = sd;
+  if (tb === 'overview' || tb === 'watch' || tb === 'map') restoredTab = tb;
+}
+function setupShareLink(){
+  $('#share-link').onclick = () => {
+    const h = filterToHash();
+    copyText(location.origin + location.pathname + h, $('#share-link'), '링크 복사됨');
+    location.hash = h.slice(1);
+  };
 }
 async function copyText(text, btn, okLabel){
   const done = () => { const t = btn.textContent; btn.textContent = okLabel;
@@ -2089,6 +2182,145 @@ function renderRebuild(){
     + `동 전체가 노후라 기준선을 못 세운 ${rb.skipped_no_base}개 동은 뺐다. `
     + `대상 ${nf(rb.total)}개의 웃돈은 중위 ${rb.median_pct}% (25~75% ${rb.p25_pct}~${rb.p75_pct}%)이고, `
     + `+30%를 넘는 것이 ${nf(rb.over30_count)}개다.`;
+}
+
+/* ---------- 시군구 2곳 비교 ----------
+   기존 데이터(region_ranking·region_monthly·D.jeonse·D.gap_investment)만 다시 묻는다 -
+   이 카드만을 위한 새 집계는 없다. 시군구와 신도시(umd_rows 가 있는 D.sido 행)를
+   같은 선택 목록에 놓고 섞어서 고를 수 있게 한다. */
+let cmpA = null, cmpB = null;
+function comparisonTargets(){
+  const regions = V().regions.map(r => ({key: r.lawd_cd, label: r.region}));
+  const specials = V().sido.filter(e => e.umd_rows).map(e => ({key: e.sido, label: e.sido}));
+  return [...regions, ...specials].sort((a,b) => a.label.localeCompare(b.label, 'ko'));
+}
+function comparisonData(key){
+  if (!key) return null;
+  const special = V().sido.find(e => e.sido === key && e.umd_rows);
+  if (special){
+    return {
+      label: special.sido, count: special.count, median_ppp: special.median_ppp,
+      p25_ppp: special.p25_ppp, p75_ppp: special.p75_ppp,
+      median_amount: special.median_amount, avg_area: special.avg_area,
+      monthly: special.monthly.map(m => ({ym: m.ym, ppp: m.median_ppp})),
+      jeonse_pct: (D.jeonse && D.jeonse.by_sido[key]) ? D.jeonse.by_sido[key].overall_pct : null,
+      gap_pct: (D.gap_investment && D.gap_investment.by_sido[key])
+        ? D.gap_investment.by_sido[key].overall_pct : null,
+    };
+  }
+  const region = V().regions.find(r => r.lawd_cd === key);
+  if (!region) return null;
+  const rm = V().region_monthly, rr = rm && rm.regions[key];
+  const monthly = rr ? rm.months.map((ym,i) => ({ym, ppp: rr.ppp[i]})) : [];
+  const jr = D.jeonse && D.jeonse.regions.find(x => x.lawd_cd === key);
+  const gr = D.gap_investment && D.gap_investment.regions.find(x => x.lawd_cd === key);
+  return {
+    label: region.region, count: region.count, median_ppp: region.median_ppp,
+    p25_ppp: region.p25_ppp, p75_ppp: region.p75_ppp,
+    median_amount: region.median_amount, avg_area: region.avg_area,
+    monthly, jeonse_pct: jr ? jr.jeonse_ratio_pct : null, gap_pct: gr ? gr.pct : null,
+  };
+}
+function renderCompareChart(a, b){
+  const months = a.monthly.length >= b.monthly.length ? a.monthly : b.monthly;
+  const vals = [...a.monthly, ...b.monthly].map(m => m.ppp).filter(v => v != null);
+  if (!vals.length || months.length < 2) return '';
+  const colors = ['#4b8ef7', '#f0715f'];
+  const W = 860, H = 240, ml = 54, mr = 20, mt = 16, mb = 32;
+  const iw = W-ml-mr, ih = H-mt-mb;
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = Math.max((hi-lo)*0.12, 1);
+  const x = i => ml + (iw/Math.max(months.length-1,1))*i;
+  const y = v => mt + ih - ((v-(lo-pad))/((hi+pad)-(lo-pad) || 1))*ih;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="두 지역 월별 중위 평당가 비교">`;
+  for (let t = 0; t <= 4; t++){
+    const v = (lo-pad) + ((hi+pad)-(lo-pad))*t/4;
+    svg += `<line class="gridline" x1="${ml}" y1="${y(v)}" x2="${ml+iw}" y2="${y(v)}"/>`
+        +  `<text class="axis-text" x="${ml-8}" y="${y(v)+4}" text-anchor="end">${nf(Math.round(v))}</text>`;
+  }
+  [[a,0],[b,1]].forEach(([s,i]) => {
+    const color = colors[i];
+    const pts = s.monthly.map((m,j) => m.ppp == null ? null : [x(j), y(m.ppp)]).filter(Boolean);
+    if (pts.length >= 2)
+      svg += `<path d="${pts.map((p,k)=>(k?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ')}"`
+          +  ` fill="none" stroke="${color}" stroke-width="2.2" stroke-linejoin="round"/>`;
+    pts.forEach(p => { svg += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.8" fill="${color}"/>`; });
+  });
+  const step = Math.ceil(months.length/8);
+  months.forEach((m,i) => { if (i % step && i !== months.length-1) return;
+    svg += `<text class="axis-text" x="${x(i)}" y="${mt+ih+18}" text-anchor="middle">${m.ym.slice(2)}</text>`; });
+  svg += '</svg>';
+  const legend = [[a,0],[b,1]].map(([s,i]) =>
+    `<span><i style="background:${colors[i]}"></i>${esc(s.label)}</span>`).join('');
+  return `<div class="legend" style="margin-bottom:6px">${legend}</div>${svg}`;
+}
+function renderCompare(){
+  const targets = comparisonTargets();
+  const opts = targets.map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('');
+  if (!targets.some(t => t.key === cmpA)) cmpA = targets[0] ? targets[0].key : null;
+  if (!targets.some(t => t.key === cmpB)) cmpB = targets[1] ? targets[1].key : null;
+  $('#cmp-a').innerHTML = opts; $('#cmp-b').innerHTML = opts;
+  if (cmpA != null) $('#cmp-a').value = cmpA;
+  if (cmpB != null) $('#cmp-b').value = cmpB;
+  $('#cmp-a').onchange = () => { cmpA = $('#cmp-a').value; renderCompare(); };
+  $('#cmp-b').onchange = () => { cmpB = $('#cmp-b').value; renderCompare(); };
+
+  const a = comparisonData(cmpA), b = comparisonData(cmpB);
+  if (!a || !b){ $('#cmp-body').innerHTML = '<p class="sub">비교할 지역이 부족하다.</p>'; return; }
+
+  const rows = [
+    ['거래건수', nf(a.count), nf(b.count)],
+    ['중위 평당가(만원)', nf(a.median_ppp), nf(b.median_ppp)],
+    ['25~75% 평당가', `${nf(a.p25_ppp)}~${nf(a.p75_ppp)}`, `${nf(b.p25_ppp)}~${nf(b.p75_ppp)}`],
+    ['중위 거래가', fmtAmount(a.median_amount), fmtAmount(b.median_amount)],
+    ['평균 전용(㎡)', a.avg_area ?? '–', b.avg_area ?? '–'],
+    ['전세가율', a.jeonse_pct != null ? `${a.jeonse_pct}%` : '–',
+                 b.jeonse_pct != null ? `${b.jeonse_pct}%` : '–'],
+    ['갭투자 비율', a.gap_pct != null ? `${a.gap_pct}%` : '–',
+                   b.gap_pct != null ? `${b.gap_pct}%` : '–'],
+  ];
+  const diff = (a.median_ppp && b.median_ppp) ? change(b.median_ppp, a.median_ppp) : null;
+  $('#cmp-body').innerHTML =
+    `<div class="cmp-grid" style="margin-bottom:14px">
+      <div></div><div class="cmp-h">${esc(a.label)}</div><div class="cmp-h">${esc(b.label)}</div>
+      ${rows.map(([label, av, bv]) => `<div>${label}</div>
+          <div class="cmp-v">${av}</div><div class="cmp-v">${bv}</div>`).join('')}
+    </div>
+    ${diff != null ? `<p class="sub" style="margin:0 0 12px">중위 평당가 기준
+      <b style="color:var(--text)">${esc(b.label)}</b>는
+      <b style="color:var(--text)">${esc(a.label)}</b>보다 ${pct(diff)}.</p>` : ''}
+    ${renderCompareChart(a, b)}`;
+}
+
+/* ---------- 신도시 프리미엄 ----------
+   검단·판교·미사·위례 등 택지지구가 걸친 시군구(들) 전체 대비 얼마나 비싸거나
+   싼지. _special_area_row() 가 이미 낸 parent_median_ppp/parent_premium_pct 를
+   그대로 보여준다 - 새 집계는 없다. */
+const newtownSort = {key: 'parent_premium_pct', dir: -1};
+function renderNewtownPremium(){
+  const rows = V().sido.filter(e => e.umd_rows && e.parent_premium_pct != null);
+  if (!rows.length){ $('#newtown-card').style.display = 'none'; return; }
+  $('#newtown-card').style.display = '';
+  $('#newtown-note').innerHTML =
+    `등록된 신도시(택지지구) ${rows.length}개가 자신이 걸친 시군구 전체 평당가 대비 `
+    + `얼마나 비싸거나 싼지다. 위례처럼 시군구 여러 개(성남시 수정구·하남시·송파구)에 `
+    + `걸친 경우 그 시군구들을 합친 전체를 기준선으로 쓴다.`;
+  renderSortChips($('#newtown-sort'),
+    [['parent_premium_pct','프리미엄'], ['median_ppp','평당가'], ['count','거래건수']],
+    newtownSort, renderNewtownPremium);
+  const sorted = sortRows(rows, newtownSort.key, newtownSort.dir);
+  const max = Math.max(...sorted.map(r => Math.abs(r.parent_premium_pct)), 1);
+  $('#newtown').innerHTML = sorted.map(r => `<div class="dist-row">
+      <div style="font-size:12.5px">${esc(r.sido)}</div>
+      <div class="track"><div class="fill" style="width:${(Math.abs(r.parent_premium_pct)/max*100).toFixed(1)}%;
+        background:${r.parent_premium_pct >= 0 ? 'var(--up)' : 'var(--down)'}"></div></div>
+      <div class="dist-val">${pct(r.parent_premium_pct)}
+        <span class="muted">· 평당 ${nf(r.median_ppp)}만(구 전체 ${nf(r.parent_median_ppp)}만) · ${r.count}건</span></div>
+    </div>`).join('');
+  $('#newtown-warn').innerHTML =
+    `<span class="muted">거친 기준이다 - "신도시 핵심 법정동 중위" 대 "원도심을 포함한 `
+    + `시군구 전체 중위"를 견준 것이라, 어느 방향으로든 신도시가 주변 시세보다 비싼지 `
+    + `싼지 정도만 가늠한다.</span>`;
 }
 
 /* ---------- 면적대별 프리미엄 추이 ---------- */
@@ -3102,7 +3334,8 @@ function initTheme(){
 
 function renderAll(){
   renderFilters(); renderKpi(); renderChart(); renderTable();
-  renderDist(); renderRecordHighs(); renderAreaPremium(); renderFloorPremium();
+  renderDist(); renderRecordHighs(); renderCompare(); renderNewtownPremium();
+  renderAreaPremium(); renderFloorPremium();
   renderJeonse(); renderJeonseByAge();
   renderRenewal(); renderConversion(); renderGapInvestment(); renderDealType();
   renderMatchedIndex(); renderCancels(); renderSettlement(); renderParty();
@@ -3133,11 +3366,14 @@ renderRebuild();
 renderAnomalies();
 setupMap();
 setupWatchTools();
+setupShareLink();
 // 주소에 담긴 목록이 있으면 먼저 받아들인다(폰 -> PC 이동, 링크 공유).
 const hashAdded = watchFromHash();
+filterFromHash();
 renderWatchAll();
 renderAll();
 if (hashAdded) switchTab('watch');
+else if (restoredTab && restoredTab !== 'overview') switchTab(restoredTab);
 
 $('#chart-mode').querySelectorAll('button').forEach(b => b.onclick = () => {
   chartMode = b.dataset.mode;

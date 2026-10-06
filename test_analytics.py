@@ -975,9 +975,51 @@ class ComplexShardDongTest(unittest.TestCase):
         rows = self._rows("2026-06", 9000, "101", 5) + self._rows("2026-06", 7000, "102", 5)
         shards = complex_shards(rows, self.MONTHS, min_dong_deals=5)
         row = next(r for r in shards["11680"]["rows"] if r[0] == "은마")
-        self.assertEqual(shards["11680"]["columns"], ["apt", "area_type", "points", "dongs"])
+        self.assertEqual(shards["11680"]["columns"],
+                          ["apt", "area_type", "points", "dongs", "gap_dates"])
         self.assertTrue(len(row[2]) >= 1)     # points 도 여전히 채워진다
         self.assertTrue(len(row[3]) == 2)
+
+
+class ComplexShardGapInvestmentTest(unittest.TestCase):
+    """complex_shards 의 5번째 열(gap_dates) - 관심단지 하나로 좁힌 갭투자 신호.
+    규칙 자체는 gap_investment_ratio() 와 같다(매매 전후 window_days 안에 같은 층 전세)."""
+
+    MONTHS = ["2026-06"]
+
+    def test_matched_sale_date_is_recorded(self):
+        sale = sale_at("2026-06-10", 100000, floor=5)
+        rents = [rent_at("2026-06-20", 40000, floor=5)]   # 매매 10일 뒤, window(45일) 안
+        shards = complex_shards([sale], self.MONTHS, rent_records=rents)
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "가나아파트")
+        self.assertEqual(row[4], ["2026-06-10"])
+
+    def test_no_rent_records_gives_empty_gap_dates(self):
+        sale = sale_at("2026-06-10", 100000, floor=5)
+        shards = complex_shards([sale], self.MONTHS)   # rent_records 생략
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "가나아파트")
+        self.assertEqual(row[4], [])
+
+    def test_floor_mismatch_not_recorded(self):
+        sale = sale_at("2026-06-10", 100000, floor=5)
+        rents = [rent_at("2026-06-15", 40000, floor=9)]   # 다른 층
+        shards = complex_shards([sale], self.MONTHS, rent_records=rents)
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "가나아파트")
+        self.assertEqual(row[4], [])
+
+    def test_outside_window_not_recorded(self):
+        sale = sale_at("2026-06-01", 100000, floor=5)
+        rents = [rent_at("2026-07-20", 40000, floor=5)]   # 49일 뒤 - window(45) 밖
+        shards = complex_shards([sale], self.MONTHS, rent_records=rents, gap_window_days=45)
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "가나아파트")
+        self.assertEqual(row[4], [])
+
+    def test_capped_at_five_most_recent_dates(self):
+        sales = [sale_at(f"2026-06-{d:02d}", 100000, floor=5) for d in range(1, 8)]
+        rents = [rent_at(f"2026-06-{d:02d}", 40000, floor=5) for d in range(1, 8)]
+        shards = complex_shards(sales, self.MONTHS, rent_records=rents)
+        row = next(r for r in shards["11680"]["rows"] if r[0] == "가나아파트")
+        self.assertEqual(row[4], [f"2026-06-{d:02d}" for d in range(3, 8)])
 
 
 class RentAnalyticsInAnalyzeTest(unittest.TestCase):
@@ -1381,6 +1423,48 @@ class SpecialAreaAnalyzeTest(unittest.TestCase):
         self.assertIsNotNone(result["broker"])
         row = next((r for r in result["broker"]["sido"] if r["sido"] == "검단신도시"), None)
         self.assertIsNotNone(row)
+
+
+def _wirye_deal(lawd_cd, region, umd, ppp, apt="가나아파트", area=84.9, floor=5):
+    amount = round(ppp * area / PYEONG)
+    return {
+        "lawd_cd": lawd_cd, "region": region, "umd": umd, "apt": apt,
+        "area_m2": area, "amount_manwon": amount, "deal_ym": "2026-06",
+        "deal_date": "2026-06-15", "price_per_pyeong": ppp,
+        "price_per_m2": round(amount / area, 2), "canceled": False, "floor": floor,
+        "area_type": int(area), "deal_gbn": "중개거래", "is_broker": True,
+    }
+
+
+class SpecialAreaParentPremiumTest(unittest.TestCase):
+    """택지지구가 걸친 시군구 전체 대비 프리미엄(parent_median_ppp/parent_premium_pct).
+    위례처럼 시군구 여러 개에 걸친 경우 그 시군구들을 합쳐 기준선 하나로 써야 한다."""
+
+    def test_premium_against_parent_sigungu(self):
+        # 검단신도시(=검단구 하나)의 핵심 법정동(당하동, ppp 3894)과 같은 구의 신도시
+        # 밖 동(왕길동, ppp 3115)을 같이 둔다 - parent 기준선은 구 전체(둘 다 포함)여야 한다.
+        sale = ([gumdan_deal("2026-06", 100000, "당하동") for _ in range(10)]
+                + [gumdan_deal("2026-06", 80000, "왕길동") for _ in range(10)])
+        result = analyze({"meta": {}, "records": sale})
+        row = next(r for r in result["sido"] if r["sido"] == "검단신도시")
+        self.assertEqual(row["median_ppp"], 3894)          # 신도시 자체(당하동만)
+        self.assertEqual(row["parent_median_ppp"], 3504)   # 구 전체(당하+왕길) 중위
+        self.assertEqual(row["parent_premium_pct"], 11.1)  # 신도시가 구 평균보다 11.1% 비싸다
+
+    def test_parent_combines_all_sigungu_for_multi_region_area(self):
+        # 위례신도시는 성남시 수정구·하남시·송파구 세 시군구에 걸쳐 있다 - 세 구 각각의
+        # 신도시 밖 거래까지 합친 것이 parent 기준선이어야 한다(한 구만 썼다면 다른 값이 나온다).
+        wirye = [_wirye_deal("41131", "경기도 성남시 수정구", "창곡동", 1000),
+                 _wirye_deal("41450", "경기도 하남시", "학암동", 2000),
+                 _wirye_deal("11710", "서울특별시 송파구", "장지동", 3000)]
+        outside = [_wirye_deal("41131", "경기도 성남시 수정구", "신흥동", 4000),
+                   _wirye_deal("41450", "경기도 하남시", "덕풍동", 5000),
+                   _wirye_deal("11710", "서울특별시 송파구", "잠실동", 6000)]
+        result = analyze({"meta": {}, "records": wirye + outside})
+        row = next(r for r in result["sido"] if r["sido"] == "위례신도시")
+        self.assertEqual(row["median_ppp"], 2000)            # 위례 자체(1000·2000·3000)
+        self.assertEqual(row["parent_median_ppp"], 3500)     # 세 구 전체 6건의 중위
+        self.assertEqual(row["parent_premium_pct"], -42.9)   # 위례가 세 구 평균보다 42.9% 싸다
 
 
 if __name__ == "__main__":
