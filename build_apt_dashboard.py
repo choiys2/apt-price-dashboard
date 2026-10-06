@@ -342,7 +342,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
 <section class="card" id="settle-card" style="display:none">
   <h2>거래 확정도 (등기완료율)</h2>
   <p class="sub" id="settle-note" style="margin:0 0 14px"></p>
-  <div class="dist" id="settle"></div>
+  <div class="dist wide" id="settle"></div>
   <p class="sub" id="settle-warn" style="margin-top:12px"></p>
 </section>
 
@@ -393,7 +393,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
   <h2>신도시 프리미엄</h2>
   <p class="sub" id="newtown-note" style="margin:0 0 12px"></p>
   <div class="filters" style="margin:0 0 10px" id="newtown-sort"></div>
-  <div class="dist" id="newtown"></div>
+  <div class="dist wide" id="newtown"></div>
   <p class="sub" id="newtown-warn" style="margin-top:12px"></p>
 </section>
 
@@ -489,7 +489,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
     <h2 style="margin:0;font-size:13.5px;color:var(--muted)">시군구별 법인 매도·매수</h2>
     <div class="filters" style="margin:0" id="party-region-sort"></div>
   </div>
-  <div class="dist" id="party-regions"></div>
+  <div class="dist wide" id="party-regions"></div>
   <p class="sub" id="party-foot" style="margin-top:10px"></p>
 </section>
 
