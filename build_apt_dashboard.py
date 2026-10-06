@@ -273,8 +273,10 @@ footer ul{padding-left:18px;margin:8px 0 0}
   .kpi .value{font-size:23px}
   .dist-row,.dist.wide .dist-row{grid-template-columns:74px 1fr;
     grid-template-areas:"a b" "c c"}
-  .dist-val{grid-area:c;text-align:left}
+  .dist-val{grid-area:c;text-align:left;white-space:normal}
   .tab{padding:9px 13px;font-size:13.5px}
+  input[type=search]{min-width:0;width:150px}
+  .cmp-grid{grid-template-columns:1fr minmax(0,72px) minmax(0,72px);gap:4px 8px;font-size:12.5px}
 }
 </style>
 </head>
@@ -349,7 +351,7 @@ footer ul{padding-left:18px;margin:8px 0 0}
 <section class="card">
   <div class="table-head">
     <h2 style="margin:0">시군구 랭킹</h2>
-    <div style="display:flex;gap:8px;align-items:center">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <input type="search" id="q" placeholder="지역 검색">
       <button class="ghost" id="csv">CSV 저장</button>
     </div>
